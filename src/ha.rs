@@ -5,112 +5,174 @@ use crate::{
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
-use tokio::sync::mpsc;
-use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tokio::{net::TcpStream, sync::mpsc};
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message};
+
+struct WSClient {
+    id: u64,
+    socket: WebSocketStream<MaybeTlsStream<TcpStream>>,
+    ha_version: String,
+}
+
+#[allow(dead_code)]
+impl WSClient {
+    pub async fn new(ws_url: &str) -> Result<Self> {
+        let (mut socket, _) = connect_async(ws_url).await.context(format!("Failed to connect to \"{}\"", ws_url))?;
+
+        let ver = match socket.next().await.context("No connection")?? {
+            msg => match serde_json::from_str::<Response>(&msg.to_string())? {
+                Response::AuthRequired(req) => req.ha_version,
+                other => return Err(anyhow::anyhow!("Expected auth_required, got: {:?}", other)),
+            },
+        };
+
+        Ok(Self {
+            id: 0,
+            socket,
+            ha_version: ver,
+        })
+    }
+
+    pub async fn auth_longlivedtoken(&mut self, ha_token: &str) -> Result<()> {
+        let auth_payload = json!({
+            "type": "auth",
+            "access_token": ha_token
+        });
+        self.socket.send(Message::Text(auth_payload.to_string().into())).await?;
+
+        let _ = match self.socket.next().await.context("No connection")?? {
+            msg => match serde_json::from_str::<Response>(&msg.to_string())? {
+                Response::AuthOk(_) => {}
+                Response::AuthInvalid(err) => anyhow::bail!("Authentication failed: {}", err.message),
+                unknown => anyhow::bail!("Unexpected response after auth: {:?}", unknown),
+            },
+        };
+
+        Ok(())
+    }
+
+    pub async fn fetch_all_states(&mut self) -> Result<Vec<(String, String)>> {
+        self.id += 1;
+        // request all entities
+        let get_states_payload = json!({
+            "id": self.id,
+            "type": "get_states"
+        });
+        self.socket.send(Message::Text(get_states_payload.to_string().into())).await?;
+
+        let states: Vec<State> = serde_json::from_value(self.get_result().await?.unwrap())?;
+        Ok(states
+            .iter()
+            .map(|st| (st.entity_id.clone(), st.state.clone()))
+            .collect())
+    }
+
+    pub async fn subscribe_all_state_changes(&mut self) -> Result<()> {
+        // Subscribe to all state_changed events
+        let subscribe_payload = json!({
+            "id": self.id,
+            "type": "subscribe_events",
+            "event_type": "state_changed"
+        });
+        self.socket.send(Message::Text(subscribe_payload.to_string().into())).await?;
+        Ok(())
+    }
+
+    pub async fn fetch_lovelace_dashboard(&mut self, dashboard_name: &str) -> Result<Vec<(String, String)>> {
+        self.id += 1;
+        let get_states_payload = json!({
+            "id": self.id,
+            "type": "lovelace/config",
+            "url_path": dashboard_name,
+            "force": false
+        });
+        self.socket.send(Message::Text(get_states_payload.to_string().into())).await?;
+
+        let cards = extract_all_cards(&self.get_result().await?.unwrap());
+        Ok(cards
+            .iter()
+            .filter_map(|c| {
+                let en = c.entity.clone()?;
+                Some((en, "TBU".to_string()))
+            })
+            .collect())
+    }
+
+    pub async fn subscribe_entities(&mut self, entity_ids: Vec<&String>) -> Result<()> {
+        self.id += 1;
+        let subscribe_payload = json!({
+            "id": self.id,
+            "type": "subscribe_entities",
+            "entity_ids": entity_ids
+        });
+        self.socket.send(Message::Text(subscribe_payload.to_string().into())).await?;
+
+        _ = self.get_result().await?; // success
+        
+        Ok(())
+    }
+
+    pub async fn fetch_services_for_entity(&mut self, entity_id: &String) -> Result<Vec<String>> {
+        self.id += 1;
+        let fetch_services_payload = json!({
+            "id": self.id,
+            "type": "get_services_for_target",
+            "target": {
+                "entity_id": [entity_id]
+            }
+        });
+        self.socket.send(Message::Text(fetch_services_payload.to_string().into())).await?;
+
+        let services: Vec<String> = serde_json::from_value(self.get_result().await?.unwrap())?;
+        let domain = entity_id.split_once('.').unwrap().0;
+        Ok(services
+            .into_iter()
+            .filter(|s|
+                s.starts_with(domain))
+            .collect())
+    }
+
+    async fn get_result(&mut self) -> Result<Option<serde_json::Value>> {
+        let msg = self.socket.next().await.context("No connection")??;
+
+        match serde_json::from_str::<Response>(&msg.to_string())? {
+            Response::Result(ws_result) if (ws_result.success && ws_result.id == self.id) => {
+                Ok(ws_result.result)
+            },
+            Response::Result(ws) => anyhow::bail!("Wrong response: {:?}", ws),
+            other => anyhow::bail!("Unexpected response type: {:?}", other),
+        }
+    }
+}
 
 pub async fn ha_worker(ha_url: &str, ha_token: &str, ui_tx: &mpsc::Sender<AppEvent>) -> Result<()> {
     ui_tx.send(AppEvent::Status("Connecting...".to_string())).await?;
     let ws_url = build_ws_url(&ha_url)?;
-    let (mut socket, _) = connect_async(ws_url).await.context("Failed to connect")?;
 
-    // Wait for auth_required
-    let text = socket.next().await.unwrap()?.to_string();
-    let response: Response = serde_json::from_str(&text).context("Failed to parse first message (auth_required)")?;
+    let mut ws_client = WSClient::new(&ws_url).await?;
+    ui_tx.send(AppEvent::Status(format!("Connected to HA v{}", ws_client.ha_version))).await?;
 
-    let Response::AuthRequired(req) = response else {
-        return Err(anyhow::anyhow!("Expected auth_required, got: {:?}", response));
-    };
-    ui_tx.send(AppEvent::Status(format!("Connected to HA v{}", req.ha_version))).await?;
-
-    // Send auth
-    let auth_payload = json!({
-        "type": "auth",
-        "access_token": ha_token
-    });
-    socket.send(Message::Text(auth_payload.to_string().into())).await?;
-
-    // Wait for auth_ok
-    let text = socket.next().await.unwrap()?.to_string();
-    let response: Response = serde_json::from_str(&text)?;
-    match response {
-        Response::AuthOk(auth) => ui_tx.send(AppEvent::Status(format!("Authenticated to {}", auth.ha_version))).await?,
-        Response::AuthInvalid(err) => anyhow::bail!("Authentication failed: {}", err.message),
-        unknown => anyhow::bail!("Unexpected response after auth: {:?}", unknown),
-    }
+    ws_client.auth_longlivedtoken(ha_token).await?;
 
     ui_tx.send(AppEvent::Status("Requesting entities".to_string())).await?;
 
-    // request all entities
-    // let get_states_payload = json!({
-    //     "id": 1,
-    //     "type": "get_states"
-    // });
-    let get_states_payload = json!({
-        "id": 1,
-        "type": "lovelace/config",
-        "url_path": "dashboard-tui",
-        "force": false
-    });
-    socket.send(Message::Text(get_states_payload.to_string().into())).await?;
+    let entities: Vec<(String, String)> = ws_client.fetch_lovelace_dashboard("dashboard-tui").await?;
 
-    // Subscribe to all state_changed events
-    // let subscribe_payload = json!({
-    //     "id": 2,
-    //     "type": "subscribe_events",
-    //     "event_type": "state_changed"
-    // });
-    // socket
-    //     .send(Message::Text(subscribe_payload.to_string().into()))
-    //     .await?;
-
-    // parser loop
-    while let Some(msg) = socket.next().await {
+    ui_tx.send(AppEvent::Snapshot {
+        title: "Home Assistant".to_string(),
+        views: 0,
+        entities: entities.clone(), //TODO going to be changed
+    }).await?;
+    ui_tx.send(AppEvent::Status("Displaying".to_string())).await?;
+    
+    ws_client.subscribe_entities(entities.iter().map(|(id,_)| id).collect::<Vec<_>>()).await?;
+    
+    // event loop
+    while let Some(msg) = ws_client.socket.next().await {
         if let Message::Text(text) = msg? {
             let value: Value = serde_json::from_str(&text)?;
 
             match serde_json::from_value::<Response>(value) {
-                Ok(Response::Result(ws_result)) => {
-                    if ws_result.success && ws_result.result.is_some() {
-                        let value = ws_result.result.unwrap();
-
-                        let mut entities: Vec<(String, String)> = if value.is_object() {
-                            let cards = extract_all_cards(&value);
-
-                            cards
-                                .iter()
-                                .filter_map(|c| {
-                                    let en = c.entity.clone()?;
-                                    Some((en, "TBU".to_string()))
-                                })
-                                .collect()
-                        } else {
-                            let states: Vec<State> = serde_json::from_value(value)?;
-
-                            states
-                                .iter()
-                                .map(|st| (st.entity_id.clone(), st.state.clone()))
-                                .collect()
-                        };
-                        let subscribe_payload = json!({
-                            "id": 2,
-                            "type": "subscribe_entities",
-                            "entity_ids": entities.iter().map(|(id,_)| id).collect::<Vec<_>>()
-                        });
-                        socket.send(Message::Text(subscribe_payload.to_string().into())).await?;
-
-                        entities.sort_by(|a, b| a.0.cmp(&b.0));
-
-                        ui_tx.send(AppEvent::Snapshot {
-                                title: "Home Assistant".to_string(),
-                                views: 0,
-                                entities,
-                            }).await?;
-                        ui_tx.send(AppEvent::Status("Displaying".to_string())).await?;
-
-                    } else if let Some(err) = ws_result.error {
-                        ui_tx.send(AppEvent::Error(format!("Response failed with {}", err))).await?;
-                    }
-                }
                 Ok(Response::Event(ws_event)) => {
                     match serde_json::from_value::<Event>(ws_event.event) {
                         Ok(Event::NormalEvent(event)) => {
@@ -138,7 +200,10 @@ pub async fn ha_worker(ha_url: &str, ha_token: &str, ui_tx: &mpsc::Sender<AppEve
                             ui_tx.send(AppEvent::Error("Unsupported event type".to_string())).await?;
                         }
                     }
-                }
+                },
+                Ok(Response::Result(ws_result)) => {
+                    ui_tx.send(AppEvent::Error(format!("Unexpected WS Result: {:?}", ws_result))).await?;
+                },
                 _ => {
                     ui_tx.send(AppEvent::Error("WS message unparsed".to_string())).await?;
                 }
