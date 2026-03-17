@@ -3,6 +3,7 @@ use ratatui::widgets::ListState;
 
 #[derive(Debug)]
 pub enum AppEvent {
+    // from backend
     Snapshot {
         title: String,
         views: usize,
@@ -11,6 +12,9 @@ pub enum AppEvent {
     StateChanged { entity_id: String, state: String },
     Status(String),
     Error(String),
+
+    // from ui
+    CallService { entity_id: String, service: String },
 }
 
 pub struct AppState {

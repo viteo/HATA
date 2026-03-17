@@ -131,6 +131,22 @@ impl WSClient {
                 s.starts_with(domain))
             .collect())
     }
+    
+    pub async fn call_service(&mut self, service: &str, entity_id: &str) -> Result<()> {
+        self.id += 1;
+        let call_service_payload = json!({
+            "id": self.id,
+            "type": "call_service",
+            "domain": entity_id.split_once('.').unwrap().0,
+            "service": service,
+            "target": {
+                "entity_id": entity_id
+            }
+        });
+        self.socket.send(Message::Text(call_service_payload.to_string().into())).await?;
+
+        Ok(())
+    }
 
     async fn get_result(&mut self) -> Result<Option<serde_json::Value>> {
         let msg = self.socket.next().await.context("No connection")??;
@@ -145,7 +161,7 @@ impl WSClient {
     }
 }
 
-pub async fn ha_worker(ha_url: &str, ha_token: &str, ui_tx: &mpsc::Sender<AppEvent>) -> Result<()> {
+pub async fn ha_worker(ha_url: &str, ha_token: &str, ui_tx: &mpsc::Sender<AppEvent>, ev_rx: &mut mpsc::Receiver<AppEvent>) -> Result<()> {
     ui_tx.send(AppEvent::Status("Connecting...".to_string())).await?;
     let ws_url = build_ws_url(&ha_url)?;
 
@@ -168,50 +184,62 @@ pub async fn ha_worker(ha_url: &str, ha_token: &str, ui_tx: &mpsc::Sender<AppEve
     ws_client.subscribe_entities(entities.iter().map(|(id,_)| id).collect::<Vec<_>>()).await?;
     
     // event loop
-    while let Some(msg) = ws_client.socket.next().await {
-        if let Message::Text(text) = msg? {
-            let value: Value = serde_json::from_str(&text)?;
+    loop {
+        tokio::select! {
+            Some(msg) = ws_client.socket.next() => {
+                if let Message::Text(text) = msg? {
+                    let value: Value = serde_json::from_str(&text)?;
 
-            match serde_json::from_value::<Response>(value) {
-                Ok(Response::Event(ws_event)) => {
-                    match serde_json::from_value::<Event>(ws_event.event) {
-                        Ok(Event::NormalEvent(event)) => {
-                            if event.event_type == "state_changed" {
-                                let entity_id = event.data.entity_id.unwrap();
-                                if let Some(new_state) = event.data.new_state {
-                                    let state = new_state.state;
-                                    ui_tx.send(AppEvent::StateChanged { entity_id, state }).await?;
+                    match serde_json::from_value::<Response>(value) {
+                        Ok(Response::Event(ws_event)) => {
+                            match serde_json::from_value::<Event>(ws_event.event) {
+                                Ok(Event::NormalEvent(event)) => {
+                                    if event.event_type == "state_changed" {
+                                        let entity_id = event.data.entity_id.unwrap();
+                                        if let Some(new_state) = event.data.new_state {
+                                            let state = new_state.state;
+                                            ui_tx.send(AppEvent::StateChanged { entity_id, state }).await?;
+                                        }
+                                    }
+                                }
+                                Ok(Event::CompressedEvent(event)) => {
+                                    if let Some(added) = event.added {
+                                        for (entity_id, state) in added{
+                                            ui_tx.send(AppEvent::StateChanged { entity_id, state : state.state }).await?;
+                                        }
+                                    }
+                                    if let Some(changed) = event.changed {
+                                        for (entity_id, update) in changed {
+                                            ui_tx.send(AppEvent::StateChanged { entity_id, state: update.additions.unwrap().state }).await?;
+                                        }
+                                    }
+                                }
+                                _ => {
+                                    ui_tx.send(AppEvent::Error("Unsupported event type".to_string())).await?;
                                 }
                             }
-                        }
-                        Ok(Event::CompressedEvent(event)) => {
-                            if let Some(added) = event.added {
-                                for (entity_id, state) in added{
-                                    ui_tx.send(AppEvent::StateChanged { entity_id, state : state.state }).await?;
-                                }
+                        },
+                        Ok(Response::Result(ws_result)) => {
+                            if ws_result.success == false {
+                                ui_tx.send(AppEvent::Error(format!("Result Error: {:?}", ws_result))).await?;
                             }
-                            if let Some(changed) = event.changed {
-                                for (entity_id, update) in changed {
-                                    ui_tx.send(AppEvent::StateChanged { entity_id, state: update.additions.unwrap().state }).await?;
-                                }
-                            }
-                        }
+                        },
                         _ => {
-                            ui_tx.send(AppEvent::Error("Unsupported event type".to_string())).await?;
+                            ui_tx.send(AppEvent::Error("WS message unparsed".to_string())).await?;
                         }
                     }
-                },
-                Ok(Response::Result(ws_result)) => {
-                    ui_tx.send(AppEvent::Error(format!("Unexpected WS Result: {:?}", ws_result))).await?;
-                },
-                _ => {
-                    ui_tx.send(AppEvent::Error("WS message unparsed".to_string())).await?;
+                }
+            },
+            Some(cmd) = ev_rx.recv() => {
+                match cmd {
+                    AppEvent::CallService { entity_id, service } => {
+                        ws_client.call_service(&service, &entity_id).await?;
+                    },
+                    _ => {},
                 }
             }
         }
     }
-
-    Ok(())
 }
 
 fn build_ws_url(base: &str) -> Result<String> {

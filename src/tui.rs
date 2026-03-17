@@ -28,7 +28,7 @@ pub fn terminal_restore(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Re
     Ok(())
 }
 
-pub async fn tui_worker(rx: &mut mpsc::Receiver<AppEvent>) -> Result<()> {
+pub async fn tui_worker(ui_rx: &mut mpsc::Receiver<AppEvent>, ev_tx: &mpsc::Sender<AppEvent>) -> Result<()> {
     let mut terminal = terminal_setup()?;
     let mut app = AppState::new();
     let mut input = EventStream::new();
@@ -45,7 +45,7 @@ pub async fn tui_worker(rx: &mut mpsc::Receiver<AppEvent>) -> Result<()> {
         })?;
 
         tokio::select! {
-            maybe_ev = rx.recv() => {
+            maybe_ev = ui_rx.recv() => {
                 if let Some(ev) = maybe_ev {
                     match ev {
                         AppEvent::Snapshot { title, views, entities } => {
@@ -61,6 +61,7 @@ pub async fn tui_worker(rx: &mut mpsc::Receiver<AppEvent>) -> Result<()> {
                         }
                         AppEvent::Status(s) => app.status = s,
                         AppEvent::Error(e) => app.last_error = Some(e),
+                        _ => {},
                     }
                 } else {
                     // Background task ended; keep UI running so user can see status/error.
@@ -80,6 +81,13 @@ pub async fn tui_worker(rx: &mut mpsc::Receiver<AppEvent>) -> Result<()> {
                             }
                             KeyCode::Down => {
                                 if app.selected + 1 < app.entities.len() { app.selected += 1; }
+                            }
+                            KeyCode::Enter => {
+                                if !app.entities.is_empty() {
+                                    let entity_id = app.entities[app.selected].clone();
+                                    let service = "toggle".to_string(); // or any other service
+                                    let _ = ev_tx.send(AppEvent::CallService { entity_id, service }).await;
+                                }
                             }
                             _ => {}
                         }
