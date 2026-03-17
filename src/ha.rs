@@ -175,8 +175,6 @@ pub async fn ha_worker(ha_url: &str, ha_token: &str, ui_tx: &mpsc::Sender<AppEve
     let entities: Vec<(String, String)> = ws_client.fetch_lovelace_dashboard("dashboard-tui").await?;
 
     ui_tx.send(AppEvent::Snapshot {
-        title: "Home Assistant".to_string(),
-        views: 0,
         entities: entities.clone(), //TODO going to be changed
     }).await?;
     ui_tx.send(AppEvent::Status("Displaying".to_string())).await?;

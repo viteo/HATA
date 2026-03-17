@@ -8,7 +8,7 @@ use futures_util::StreamExt;
 use ratatui::{
     Frame, Terminal, backend::CrosstermBackend, layout::{Constraint, Layout, Rect}, style::{Modifier, Style}, widgets::{Block, Borders, List, ListItem, Paragraph}
 };
-use std::io::{self, Stdout};
+use std::{io::{self, Stdout}};
 use tokio::sync::mpsc;
 
 use crate::app::{AppEvent, AppState};
@@ -33,41 +33,25 @@ pub async fn tui_worker(ui_rx: &mut mpsc::Receiver<AppEvent>, ev_tx: &mpsc::Send
     let mut app = AppState::new();
     let mut input = EventStream::new();
 
+    terminal.draw(|f| renderer_cb(f, &mut app))?;
+    
     loop {
-        terminal.draw(|frame| {
-            let [header ,body, footer] = Layout::vertical([Constraint::Length(3), Constraint::Min(1), Constraint::Length(1),])
-                // .spacing(Spacing::Overlap(1))
-                .areas(frame.area());
-
-            draw_header(frame, &app, &header);
-            draw_body(frame, &mut app, &body);
-            draw_footer(frame, &app, &footer);
-        })?;
-
         tokio::select! {
             maybe_ev = ui_rx.recv() => {
                 if let Some(ev) = maybe_ev {
                     match ev {
-                        AppEvent::Snapshot { title, views, entities } => {
-                            app.title = title;
-                            app.views = views;
-                            app.states = entities.iter().map(|(id, st)| (id.clone(), st.clone())).collect();
-                            app.entities = entities.into_iter().map(|(id, _)| id).collect();
-                            app.entities.sort();
-                            app.selected = app.selected.min(app.entities.len().saturating_sub(1));
+                        AppEvent::Snapshot { entities } => {
+                            app.entities.extend(entities.into_iter());
+                            app.selected.select(Some(0));
                         }
                         AppEvent::StateChanged { entity_id, state } => {
-                            app.states.insert(entity_id, state);
+                            app.entities.insert(entity_id, state);
                         }
                         AppEvent::Status(s) => app.status = s,
                         AppEvent::Error(e) => app.last_error = Some(e),
                         _ => {},
                     }
-                } else {
-                    // Background task ended; keep UI running so user can see status/error.
-                    if app.status == "Connected" {
-                        app.status = "Disconnected".to_string();
-                    }
+                    terminal.draw(|f| renderer_cb(f, &mut app))?;
                 }
             }
             maybe_in = input.next() => {
@@ -77,20 +61,25 @@ pub async fn tui_worker(ui_rx: &mut mpsc::Receiver<AppEvent>, ev_tx: &mpsc::Send
                         match key.code {
                             KeyCode::Char('q') => break,
                             KeyCode::Up => {
-                                if app.selected > 0 { app.selected -= 1; }
+                                if let Some(i) = app.selected.selected() {
+                                    app.selected.select(Some(if i == 0 { app.entities.len() - 1} else { i - 1 }));
+                                }
                             }
                             KeyCode::Down => {
-                                if app.selected + 1 < app.entities.len() { app.selected += 1; }
+                                if let Some(i) = app.selected.selected() {
+                                    app.selected.select(Some(if i >= app.entities.len() - 1 { 0 } else { i + 1 }));
+                                }
                             }
                             KeyCode::Enter => {
                                 if !app.entities.is_empty() {
-                                    let entity_id = app.entities[app.selected].clone();
+                                    let (entity_id, _) = app.entities.get_index(app.selected.selected().unwrap()).unwrap();
                                     let service = "toggle".to_string(); // or any other service
-                                    let _ = ev_tx.send(AppEvent::CallService { entity_id, service }).await;
+                                    let _ = ev_tx.send(AppEvent::CallService { entity_id: entity_id.to_string(), service }).await;
                                 }
                             }
                             _ => {}
                         }
+                        terminal.draw(|f| renderer_cb(f, &mut app))?;
                     }
                 }
             }
@@ -100,14 +89,25 @@ pub async fn tui_worker(ui_rx: &mut mpsc::Receiver<AppEvent>, ev_tx: &mpsc::Send
     terminal_restore(&mut terminal)
 }
 
+fn renderer_cb(frame: &mut Frame, app: &mut AppState) {
+    let [header ,body, footer] = Layout::vertical([
+            Constraint::Length(3),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
+        // .spacing(Spacing::Overlap(1))
+        .areas(frame.area());
+
+    draw_header(frame, &app, &header);
+    draw_body(frame, app, &body);
+    draw_footer(frame, &app, &footer);
+}
+
 fn draw_header(frame: &mut Frame, app: &AppState, area: &Rect) {
-    let header = Paragraph::new(format!(
-        "Views: {}  |  {}",
-        app.views, app.status
-    ))
+    let header = Paragraph::new(format!("App status: {}", app.status))
     .block(Block::bordered()
         // .merge_borders(MergeStrategy::Exact)
-        .title(app.title.clone()));
+        .title(app.title));
 
     frame.render_widget(header, *area);
 }
@@ -117,8 +117,7 @@ fn draw_body(frame: &mut Frame, app: &mut AppState, area: &Rect) {
         .entities
         .iter()
         .map(|id| {
-            let st = app.states.get(id).map(String::as_str).unwrap_or("<unknown>");
-            ListItem::new(format!("{id}: {st}"))
+            ListItem::new(format!("{}: {}", id.0, id.1))
         })
         .collect();
 
@@ -133,13 +132,7 @@ fn draw_body(frame: &mut Frame, app: &mut AppState, area: &Rect) {
         list = list.highlight_symbol(">> ");
     }
 
-    let selected = if app.entities.is_empty() {
-        None
-    } else {
-        Some(app.selected.min(app.entities.len().saturating_sub(1)))
-    };
-    app.list_state.select(selected);
-    frame.render_stateful_widget(list, *area, &mut app.list_state);
+    frame.render_stateful_widget(list, *area, &mut app.selected);
 }
 
 fn draw_footer(frame: &mut Frame, app: &AppState, area: &Rect) {
