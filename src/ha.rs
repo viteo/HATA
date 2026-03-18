@@ -91,13 +91,16 @@ impl WSClient {
             .filter_map(|c| {
                 let entity_id = c.entity?;
                 let domain = entity_id.split_once('.').unwrap().0.to_string();
-                Some((entity_id, Card {
-                    state: String::new(),
-                    friendly_name: String::new(),
-                    domain: domain,
-                    r#type: c.r#type,
-                    services: vec![]
-                }))
+                Some((
+                    entity_id,
+                    Card {
+                        state: String::new(),
+                        friendly_name: String::new(),
+                        domain: domain,
+                        r#type: c.r#type,
+                        services: vec![],
+                    },
+                ))
             })
             .collect())
     }
@@ -112,7 +115,7 @@ impl WSClient {
         self.socket.send(Message::Text(subscribe_payload.to_string().into())).await?;
 
         _ = self.get_result().await?; // success
-        
+
         Ok(())
     }
 
@@ -131,11 +134,10 @@ impl WSClient {
         let domain = entity_id.split_once('.').unwrap().0;
         Ok(services
             .into_iter()
-            .filter(|s|
-                s.starts_with(domain))
+            .filter(|s| s.starts_with(domain))
             .collect())
     }
-    
+
     pub async fn call_service(&mut self, service: &str, entity_id: &str) -> Result<()> {
         self.id += 1;
         let call_service_payload = json!({
@@ -158,7 +160,7 @@ impl WSClient {
         match serde_json::from_str::<Response>(&msg.to_string())? {
             Response::Result(ws_result) if (ws_result.success && ws_result.id == self.id) => {
                 Ok(ws_result.result)
-            },
+            }
             Response::Result(ws) => anyhow::bail!("Wrong response: {:?}", ws),
             other => anyhow::bail!("Unexpected response type: {:?}", other),
         }
@@ -183,68 +185,70 @@ pub async fn ha_worker(ha_url: &str, ha_token: &str, ui_tx: &mpsc::Sender<AppEve
 
     ws_client.subscribe_entities(entities.iter().map(|(id,_)| id).collect::<Vec<_>>()).await?;
 
-    ui_tx.send(AppEvent::Snapshot {
-        entities: entities,
-    }).await?;
+    ui_tx.send(AppEvent::Snapshot { entities: entities }).await?;
     ui_tx.send(AppEvent::Status("Displaying".to_string())).await?;
-    
+
     // event loop
     loop {
         tokio::select! {
-            Some(Ok(Message::Text(text))) = ws_client.socket.next() => {
-                match serde_json::from_str::<Response>(&text) {
-                    Ok(Response::Event(ws_event)) => {
-                        match serde_json::from_value::<Event>(ws_event.event) {
-                            Ok(Event::NormalEvent(event)) => {
-                                if event.event_type == "state_changed" {
-                                    let entity_id = event.data.entity_id.unwrap();
-                                    if let Some(new_state) = event.data.new_state {
-                                        let state = new_state.state;
-                                        ui_tx.send(AppEvent::StateChanged { entity_id, state }).await?;
+            ws_result = ws_client.socket.next() => {
+                if let Some(Ok(Message::Text(text))) = ws_result {
+                    match serde_json::from_str::<Response>(&text) {
+                        Ok(Response::Event(ws_event)) => {
+                            match serde_json::from_value::<Event>(ws_event.event) {
+                                Ok(Event::NormalEvent(event)) => {
+                                    if event.event_type == "state_changed" {
+                                        let entity_id = event.data.entity_id.unwrap();
+                                        if let Some(new_state) = event.data.new_state {
+                                            let state = new_state.state;
+                                            ui_tx.send(AppEvent::StateChanged { entity_id, state }).await?;
+                                        }
                                     }
                                 }
-                            }
-                            Ok(Event::CompressedEvent(event)) => {
-                                if let Some(added) = event.added {
-                                    for (entity_id, state) in added{
-                                        ui_tx.send(AppEvent::EventAdded { 
-                                            friendly_name : state.attributes
-                                                .as_ref()
-                                                .and_then(|attr| attr.get("friendly_name"))
-                                                .and_then(|value| value.as_str())
-                                                .unwrap_or(&entity_id).to_string(),
-                                            state : state.state,
-                                            entity_id
-                                        }).await?;
+                                Ok(Event::CompressedEvent(event)) => {
+                                    if let Some(added) = event.added {
+                                        for (entity_id, state) in added{
+                                            ui_tx.send(AppEvent::EventAdded {
+                                                friendly_name : state.attributes
+                                                    .as_ref()
+                                                    .and_then(|attr| attr.get("friendly_name"))
+                                                    .and_then(|value| value.as_str())
+                                                    .unwrap_or(&entity_id).to_string(),
+                                                state : state.state,
+                                                entity_id
+                                            }).await?;
+                                        }
+                                    }
+                                    if let Some(changed) = event.changed {
+                                        for (entity_id, update) in changed {
+                                            ui_tx.send(AppEvent::StateChanged { entity_id, state: update.additions.unwrap().state }).await?;
+                                        }
                                     }
                                 }
-                                if let Some(changed) = event.changed {
-                                    for (entity_id, update) in changed {
-                                        ui_tx.send(AppEvent::StateChanged { entity_id, state: update.additions.unwrap().state }).await?;
-                                    }
+                                _ => {
+                                    ui_tx.send(AppEvent::Error("Unsupported event type".to_string())).await?;
                                 }
                             }
-                            _ => {
-                                ui_tx.send(AppEvent::Error("Unsupported event type".to_string())).await?;
+                        },
+                        Ok(Response::Result(ws_result)) => {
+                            if ws_result.success == false {
+                                ui_tx.send(AppEvent::Error(format!("Result Error: {:?}", ws_result))).await?;
                             }
+                        },
+                        _ => {
+                            ui_tx.send(AppEvent::Error("WS message unparsed".to_string())).await?;
                         }
-                    },
-                    Ok(Response::Result(ws_result)) => {
-                        if ws_result.success == false {
-                            ui_tx.send(AppEvent::Error(format!("Result Error: {:?}", ws_result))).await?;
-                        }
-                    },
-                    _ => {
-                        ui_tx.send(AppEvent::Error("WS message unparsed".to_string())).await?;
                     }
                 }
             },
-            Some(cmd) = ev_rx.recv() => {
-                match cmd {
-                    AppEvent::CallService { entity_id, service } => {
-                        ws_client.call_service(&service, &entity_id).await?;
-                    },
-                    _ => {},
+            cmd = ev_rx.recv() => {
+                if let Some(cmd) = cmd {
+                    match cmd {
+                        AppEvent::CallService { entity_id, service } => {
+                            ws_client.call_service(&service, &entity_id).await?;
+                        },
+                        _ => {},
+                    }
                 }
             }
         }
