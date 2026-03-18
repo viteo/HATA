@@ -11,7 +11,7 @@ use ratatui::{
 use std::{io::{self, Stdout}};
 use tokio::sync::mpsc;
 
-use crate::app::{AppEvent, AppState};
+use crate::types::app::{AppEvent, AppState};
 
 pub fn terminal_setup() -> Result<Terminal<CrosstermBackend<Stdout>>> {
     enable_raw_mode().context("Failed to enable raw mode")?;
@@ -34,18 +34,26 @@ pub async fn tui_worker(ui_rx: &mut mpsc::Receiver<AppEvent>, ev_tx: &mpsc::Send
     let mut input = EventStream::new();
 
     terminal.draw(|f| renderer_cb(f, &mut app))?;
-    
+
     loop {
         tokio::select! {
             maybe_ev = ui_rx.recv() => {
                 if let Some(ev) = maybe_ev {
                     match ev {
                         AppEvent::Snapshot { entities } => {
-                            app.entities.extend(entities.into_iter());
+                            app.entities.extend(entities);
                             app.selected.select(Some(0));
+                        },
+                        AppEvent::EventAdded { entity_id, friendly_name, state } => {
+                            if let Some(card) = app.entities.get_mut(&entity_id){
+                                card.friendly_name = friendly_name;
+                                card.state = state;
+                            }
                         }
                         AppEvent::StateChanged { entity_id, state } => {
-                            app.entities.insert(entity_id, state);
+                            if let Some(card) = app.entities.get_mut(&entity_id){
+                                card.state = state;
+                            }
                         }
                         AppEvent::Status(s) => app.status = s,
                         AppEvent::Error(e) => app.last_error = Some(e),
@@ -116,8 +124,9 @@ fn draw_body(frame: &mut Frame, app: &mut AppState, area: &Rect) {
     let items: Vec<ListItem> = app
         .entities
         .iter()
-        .map(|id| {
-            ListItem::new(format!("{}: {}", id.0, id.1))
+        .map(|(_, card)| {
+            ListItem::new(format!("{}: {} | {} {} ({:?})",
+                card.friendly_name, card.state, card.domain, card.r#type, card.services))
         })
         .collect();
 

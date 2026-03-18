@@ -1,10 +1,7 @@
-use crate::{
-    app::AppEvent,
-    types::{events::*, lovelace::extract_all_cards, responses::Response},
-};
+use crate::types::{app::{AppEvent, Card}, events::*, lovelace::extract_all_cards, responses::Response};
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
-use serde_json::{Value, json};
+use serde_json::json;
 use tokio::{net::TcpStream, sync::mpsc};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message};
 
@@ -78,7 +75,7 @@ impl WSClient {
         Ok(())
     }
 
-    pub async fn fetch_lovelace_dashboard(&mut self, dashboard_name: &str) -> Result<Vec<(String, String)>> {
+    pub async fn fetch_lovelace_dashboard(&mut self, dashboard_name: &str) -> Result<Vec<(String, Card)>> {
         self.id += 1;
         let get_states_payload = json!({
             "id": self.id,
@@ -90,10 +87,17 @@ impl WSClient {
 
         let cards = extract_all_cards(&self.get_result().await?.unwrap());
         Ok(cards
-            .iter()
+            .into_iter()
             .filter_map(|c| {
-                let en = c.entity.clone()?;
-                Some((en, "TBU".to_string()))
+                let entity_id = c.entity?;
+                let domain = entity_id.split_once('.').unwrap().0.to_string();
+                Some((entity_id, Card {
+                    state: String::new(),
+                    friendly_name: String::new(),
+                    domain: domain,
+                    r#type: c.r#type,
+                    services: vec![]
+                }))
             })
             .collect())
     }
@@ -172,59 +176,66 @@ pub async fn ha_worker(ha_url: &str, ha_token: &str, ui_tx: &mpsc::Sender<AppEve
 
     ui_tx.send(AppEvent::Status("Requesting entities".to_string())).await?;
 
-    let entities: Vec<(String, String)> = ws_client.fetch_lovelace_dashboard("dashboard-tui").await?;
+    let mut entities: Vec<(String, Card)> = ws_client.fetch_lovelace_dashboard("dashboard-tui").await?;
+    for (id, card) in &mut entities {
+        card.services = ws_client.fetch_services_for_entity(&id).await?;
+    }
+
+    ws_client.subscribe_entities(entities.iter().map(|(id,_)| id).collect::<Vec<_>>()).await?;
 
     ui_tx.send(AppEvent::Snapshot {
-        entities: entities.clone(), //TODO going to be changed
+        entities: entities,
     }).await?;
     ui_tx.send(AppEvent::Status("Displaying".to_string())).await?;
-    
-    ws_client.subscribe_entities(entities.iter().map(|(id,_)| id).collect::<Vec<_>>()).await?;
     
     // event loop
     loop {
         tokio::select! {
-            Some(msg) = ws_client.socket.next() => {
-                if let Message::Text(text) = msg? {
-                    let value: Value = serde_json::from_str(&text)?;
-
-                    match serde_json::from_value::<Response>(value) {
-                        Ok(Response::Event(ws_event)) => {
-                            match serde_json::from_value::<Event>(ws_event.event) {
-                                Ok(Event::NormalEvent(event)) => {
-                                    if event.event_type == "state_changed" {
-                                        let entity_id = event.data.entity_id.unwrap();
-                                        if let Some(new_state) = event.data.new_state {
-                                            let state = new_state.state;
-                                            ui_tx.send(AppEvent::StateChanged { entity_id, state }).await?;
-                                        }
+            Some(Ok(Message::Text(text))) = ws_client.socket.next() => {
+                match serde_json::from_str::<Response>(&text) {
+                    Ok(Response::Event(ws_event)) => {
+                        match serde_json::from_value::<Event>(ws_event.event) {
+                            Ok(Event::NormalEvent(event)) => {
+                                if event.event_type == "state_changed" {
+                                    let entity_id = event.data.entity_id.unwrap();
+                                    if let Some(new_state) = event.data.new_state {
+                                        let state = new_state.state;
+                                        ui_tx.send(AppEvent::StateChanged { entity_id, state }).await?;
                                     }
-                                }
-                                Ok(Event::CompressedEvent(event)) => {
-                                    if let Some(added) = event.added {
-                                        for (entity_id, state) in added{
-                                            ui_tx.send(AppEvent::StateChanged { entity_id, state : state.state }).await?;
-                                        }
-                                    }
-                                    if let Some(changed) = event.changed {
-                                        for (entity_id, update) in changed {
-                                            ui_tx.send(AppEvent::StateChanged { entity_id, state: update.additions.unwrap().state }).await?;
-                                        }
-                                    }
-                                }
-                                _ => {
-                                    ui_tx.send(AppEvent::Error("Unsupported event type".to_string())).await?;
                                 }
                             }
-                        },
-                        Ok(Response::Result(ws_result)) => {
-                            if ws_result.success == false {
-                                ui_tx.send(AppEvent::Error(format!("Result Error: {:?}", ws_result))).await?;
+                            Ok(Event::CompressedEvent(event)) => {
+                                if let Some(added) = event.added {
+                                    for (entity_id, state) in added{
+                                        ui_tx.send(AppEvent::EventAdded { 
+                                            friendly_name : state.attributes
+                                                .as_ref()
+                                                .and_then(|attr| attr.get("friendly_name"))
+                                                .and_then(|value| value.as_str())
+                                                .unwrap_or(&entity_id).to_string(),
+                                            state : state.state,
+                                            entity_id
+                                        }).await?;
+                                    }
+                                }
+                                if let Some(changed) = event.changed {
+                                    for (entity_id, update) in changed {
+                                        ui_tx.send(AppEvent::StateChanged { entity_id, state: update.additions.unwrap().state }).await?;
+                                    }
+                                }
                             }
-                        },
-                        _ => {
-                            ui_tx.send(AppEvent::Error("WS message unparsed".to_string())).await?;
+                            _ => {
+                                ui_tx.send(AppEvent::Error("Unsupported event type".to_string())).await?;
+                            }
                         }
+                    },
+                    Ok(Response::Result(ws_result)) => {
+                        if ws_result.success == false {
+                            ui_tx.send(AppEvent::Error(format!("Result Error: {:?}", ws_result))).await?;
+                        }
+                    },
+                    _ => {
+                        ui_tx.send(AppEvent::Error("WS message unparsed".to_string())).await?;
                     }
                 }
             },

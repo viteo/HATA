@@ -1,16 +1,15 @@
-mod app;
 mod args;
 mod ha;
 mod tui;
-mod types { pub mod lovelace; pub mod events; pub mod responses;}
+mod types { pub mod lovelace; pub mod events; pub mod responses; pub mod app;}
 
 use anyhow::Result;
 use tokio::sync::mpsc;
 
-use crate::app::{AppEvent};
 use crate::args::Args;
 use crate::ha::ha_worker;
 use crate::tui::tui_worker;
+use crate::types::app::AppEvent;
 
 #[tokio::main]
 async fn main() -> Result<()> {

@@ -2,12 +2,22 @@ use indexmap::IndexMap;
 use ratatui::widgets::ListState;
 
 #[derive(Debug)]
+pub struct Card {
+    pub friendly_name: String,
+    pub state: String,
+    pub domain: String,
+    pub services: Vec<String>,
+    pub r#type: String,
+}
+
+#[derive(Debug)]
 pub enum AppEvent {
     // from backend
     Snapshot {
-        entities: Vec<(String, String)>,
+        entities: Vec<(String, Card)>,
     },
     StateChanged { entity_id: String, state: String },
+    EventAdded { entity_id: String, friendly_name: String, state: String },
     Status(String),
     Error(String),
 
@@ -17,7 +27,7 @@ pub enum AppEvent {
 
 pub struct AppState {
     pub title: &'static str,
-    pub entities: IndexMap<String, String>,
+    pub entities: IndexMap<String, Card>, // entity_id -> card
     pub selected: ListState,
     pub status: String,
     pub last_error: Option<String>,
