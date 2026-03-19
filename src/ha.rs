@@ -163,6 +163,18 @@ impl WSClient {
             other => anyhow::bail!("Unexpected response type: {:?}", other),
         }
     }
+
+    pub async fn ping_pong(&mut self) -> Result<()> {
+        self.id += 1;
+        let ping_payload = json!({
+            "id": self.id,
+            "type": "ping"
+        });
+
+        self.socket.send(Message::Ping(ping_payload.to_string().into())).await?;
+
+        Ok(())
+    }
 }
 
 pub async fn ha_worker(ha_url: &str, ha_token: &str, ui_tx: &mpsc::Sender<AppEvent>, ev_rx: &mut mpsc::Receiver<AppEvent>) -> Result<()> {
@@ -183,11 +195,10 @@ pub async fn ha_worker(ha_url: &str, ha_token: &str, ui_tx: &mpsc::Sender<AppEve
 
     ws_client.subscribe_entities(entities.iter().map(|(id,_)| id).collect::<Vec<_>>()).await?;
 
-    ui_tx.send(AppEvent::Snapshot {
-        entities: entities,
-    }).await?;
+    ui_tx.send(AppEvent::Snapshot { entities: entities }).await?;
     ui_tx.send(AppEvent::Status("Displaying".to_string())).await?;
-    
+
+    let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(30));
     // event loop
     loop {
         tokio::select! {
@@ -246,6 +257,9 @@ pub async fn ha_worker(ha_url: &str, ha_token: &str, ui_tx: &mpsc::Sender<AppEve
                     },
                     _ => {},
                 }
+            },
+            _ = heartbeat.tick() => {
+                ws_client.ping_pong().await?;
             }
         }
     }

@@ -11,6 +11,7 @@ pub enum Response {
     AuthInvalid(AuthInvalid),
     Result(WSResult),
     Event(WSEvent),
+    Pong(WSPong),
 }
 
 /// Default response on HA WebSocket connection
@@ -51,6 +52,11 @@ pub struct ErrorCode {
 pub struct WSEvent {
     pub id: u64,
     pub event: Value,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct WSPong {
+    pub id: u64,
 }
 
 impl fmt::Display for ErrorCode {
