@@ -6,12 +6,12 @@ use crossterm::{
 };
 use futures_util::StreamExt;
 use ratatui::{
-    Frame, Terminal, backend::CrosstermBackend, layout::{Constraint, Layout, Rect}, style::{Modifier, Style}, widgets::{Block, Borders, List, ListItem, Paragraph}
+    Frame, Terminal, backend::CrosstermBackend, buffer::Buffer, layout::{Alignment, Constraint, Layout, Rect}, style::{Color, Style}, widgets::{Block, Paragraph, StatefulWidget, Widget, Wrap}
 };
 use std::{io::{self, Stdout}};
 use tokio::sync::mpsc;
 
-use crate::types::app::{AppEvent, AppState};
+use crate::types::app::{AppEvent, AppState, Card};
 
 pub fn terminal_setup() -> Result<Terminal<CrosstermBackend<Stdout>>> {
     enable_raw_mode().context("Failed to enable raw mode")?;
@@ -24,8 +24,7 @@ pub fn terminal_setup() -> Result<Terminal<CrosstermBackend<Stdout>>> {
 pub fn terminal_restore(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
     disable_raw_mode().context("Failed to disable raw mode")?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen).context("Failed to leave alternate screen")?;
-    terminal.show_cursor().ok();
-    Ok(())
+    terminal.show_cursor().context("Failed to restore cursor")
 }
 
 pub async fn tui_worker(ui_rx: &mut mpsc::Receiver<AppEvent>, ev_tx: &mpsc::Sender<AppEvent>) -> Result<()> {
@@ -42,7 +41,7 @@ pub async fn tui_worker(ui_rx: &mut mpsc::Receiver<AppEvent>, ev_tx: &mpsc::Send
                     match ev {
                         AppEvent::Snapshot { entities } => {
                             app.entities.extend(entities);
-                            app.selected.select(Some(0));
+                            app.selected = 0;
                         },
                         AppEvent::EventAdded { entity_id, friendly_name, state } => {
                             if let Some(card) = app.entities.get_mut(&entity_id){
@@ -59,7 +58,6 @@ pub async fn tui_worker(ui_rx: &mut mpsc::Receiver<AppEvent>, ev_tx: &mpsc::Send
                         AppEvent::Error(e) => app.last_error = Some(e),
                         _ => {},
                     }
-                    terminal.draw(|f| renderer_cb(f, &mut app))?;
                 }
             }
             maybe_in = input.next() => {
@@ -69,29 +67,25 @@ pub async fn tui_worker(ui_rx: &mut mpsc::Receiver<AppEvent>, ev_tx: &mpsc::Send
                         match key.code {
                             KeyCode::Char('q') => break,
                             KeyCode::Up => {
-                                if let Some(i) = app.selected.selected() {
-                                    app.selected.select(Some(if i == 0 { app.entities.len() - 1} else { i - 1 }));
-                                }
+                                app.selected = if app.selected == 0 { app.entities.len() - 1} else { app.selected - 1 };
                             }
                             KeyCode::Down => {
-                                if let Some(i) = app.selected.selected() {
-                                    app.selected.select(Some(if i >= app.entities.len() - 1 { 0 } else { i + 1 }));
-                                }
+                                app.selected = if app.selected >= app.entities.len() - 1 { 0 } else { app.selected + 1 };
                             }
                             KeyCode::Enter => {
                                 if !app.entities.is_empty() {
-                                    let (entity_id, _) = app.entities.get_index(app.selected.selected().unwrap()).unwrap();
+                                    let (entity_id, _) = app.entities.get_index(app.selected).unwrap();
                                     let service = "toggle".to_string(); // or any other service
                                     let _ = ev_tx.send(AppEvent::CallService { entity_id: entity_id.to_string(), service }).await;
                                 }
                             }
                             _ => {}
                         }
-                        terminal.draw(|f| renderer_cb(f, &mut app))?;
                     }
                 }
             }
         }
+        terminal.draw(|f| renderer_cb(f, &mut app))?;
     }
     
     terminal_restore(&mut terminal)
@@ -121,27 +115,43 @@ fn draw_header(frame: &mut Frame, app: &AppState, area: &Rect) {
 }
 
 fn draw_body(frame: &mut Frame, app: &mut AppState, area: &Rect) {
-    let items: Vec<ListItem> = app
-        .entities
-        .iter()
-        .map(|(_, card)| {
-            ListItem::new(format!("{}: {} | {} {} ({:?})",
-                card.friendly_name, card.state, card.domain, card.r#type, card.services))
-        })
-        .collect();
+    const CARD_WIDTH: u16 = 28;
+    const CARD_HEIGHT: u16 = 10;
+    const SPACING: u16 = 0;
 
-    let mut list = List::new(items)
-        .block(Block::bordered()
-            .borders(Borders::ALL)
-            // .merge_borders(MergeStrategy::Exact)
-            .title("Entities"))
-        .highlight_style(Style::default().add_modifier(Modifier::BOLD));
-
-    if !app.entities.is_empty() {
-        list = list.highlight_symbol(">> ");
+    if app.entities.is_empty() {
+        return;
     }
 
-    frame.render_stateful_widget(list, *area, &mut app.selected);
+    let cols_total = if area.width < CARD_WIDTH {
+        1
+    } else {
+        ((area.width + SPACING) / (CARD_WIDTH + SPACING)) as usize
+    };
+
+    let rows_total = (app.entities.len() + cols_total - 1) / cols_total;
+
+    let row_areas = Layout::vertical(vec![Constraint::Length(CARD_HEIGHT); rows_total])
+        .spacing(SPACING)
+        .split(*area);
+
+    for (row_i, &row_area) in row_areas.iter().enumerate() {
+        let start = row_i * cols_total;
+        let end = (start + cols_total).min(app.entities.len());
+        let row_entities = &app.entities[start..end];
+
+        let col_areas = Layout::horizontal(vec![Constraint::Length(CARD_WIDTH); row_entities.len()])
+            .spacing(SPACING)
+            .split(row_area);
+
+        for (col_i, &cell_area) in col_areas.iter().enumerate() {
+            let card_i = start + col_i;
+            if let Some(card) = app.entities.get_index(card_i) {
+                let mut is_selected = card_i == app.selected;
+                card.1.render(cell_area, frame.buffer_mut(), &mut is_selected);
+            }
+        }
+    }
 }
 
 fn draw_footer(frame: &mut Frame, app: &AppState, area: &Rect) {
@@ -155,4 +165,29 @@ fn draw_footer(frame: &mut Frame, app: &AppState, area: &Rect) {
     );
 
     frame.render_widget(footer, *area);
+}
+
+impl StatefulWidget for &Card {
+    type State = bool;
+
+    fn render(self, area: Rect, buf: &mut Buffer, state: &mut Self::State) {
+        let border_style = if *state == true {
+            Style::default().fg(Color::Yellow).bold()
+        } else {
+            Style::default()
+        };
+
+        let block = Block::bordered()
+            .title(self.friendly_name.clone())
+            .title_bottom(if *state { "^" } else { "" })
+            .title_alignment(Alignment::Center)
+            .border_style(border_style);
+
+        let content = Paragraph::new(format!("{}\n{}\n{:?}", self.state, self.domain, self.services))
+            .block(block)
+            .style(border_style)
+            .wrap( Wrap { trim: true} );
+
+        content.render(area, buf);
+    }
 }

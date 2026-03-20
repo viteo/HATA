@@ -1,5 +1,4 @@
 use indexmap::IndexMap;
-use ratatui::widgets::ListState;
 
 #[derive(Debug)]
 pub struct Card {
@@ -28,7 +27,7 @@ pub enum AppEvent {
 pub struct AppState {
     pub title: &'static str,
     pub entities: IndexMap<String, Card>, // entity_id -> card
-    pub selected: ListState,
+    pub selected: usize,
     pub status: String,
     pub last_error: Option<String>,
 }
@@ -38,7 +37,7 @@ impl AppState {
         Self {
             title: "Home Assistant",
             entities: IndexMap::new(),
-            selected: ListState::default(),
+            selected: 0,
             status: "<connecting>".to_string(),
             last_error: None,
         }
