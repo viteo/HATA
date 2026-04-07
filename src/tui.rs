@@ -74,9 +74,12 @@ pub async fn tui_worker(ui_rx: &mut mpsc::Receiver<AppEvent>, ev_tx: &mpsc::Send
                             }
                             KeyCode::Enter => {
                                 if !app.entities.is_empty() {
-                                    let (entity_id, _) = app.entities.get_index(app.selected).unwrap();
-                                    let service = "toggle".to_string(); // or any other service
-                                    let _ = ev_tx.send(AppEvent::CallService { entity_id: entity_id.to_string(), service }).await;
+                                    let (entity_id, card) = app.entities.get_index(app.selected).unwrap();
+                                    if let Some(service) = card.preferred_action() {
+                                        let _ = ev_tx.send(AppEvent::CallService { entity_id: entity_id.to_string(), service}).await;
+                                    } else {
+                                        app.last_error = Some(format!("No supported service for {}", entity_id));
+                                    }
                                 }
                             }
                             _ => {}

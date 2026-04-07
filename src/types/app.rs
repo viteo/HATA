@@ -9,6 +9,41 @@ pub struct Card {
     pub r#type: String,
 }
 
+impl Card {
+    pub fn preferred_action(&self) -> Option<String> {
+
+        const GENERIC_PRIORITY: &[&str] = &[
+            "toggle",
+            "press",
+            "trigger",
+            "execute",
+            "increment",
+            "media_play_pause",
+            "next_track",
+            "open",
+            "start",
+            "turn_on",
+            "close",
+            "stop",
+            "turn_off",
+        ];
+
+        for service in GENERIC_PRIORITY {
+            if self.supports_service(service) {
+                return Some(service.to_string());
+            }
+        }
+
+        self.services.first().cloned()
+    }
+
+    fn supports_service(&self, service_name: &str) -> bool {
+        self.services.iter().any(|svc| {
+            svc.contains(service_name)
+        })
+    }
+}
+
 #[derive(Debug)]
 pub enum AppEvent {
     // from backend
