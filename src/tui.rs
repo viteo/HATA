@@ -6,12 +6,13 @@ use crossterm::{
 };
 use futures_util::StreamExt;
 use ratatui::{
-    Frame, Terminal, backend::CrosstermBackend, buffer::Buffer, layout::{Alignment, Constraint, Layout, Rect}, style::{Color, Style}, widgets::{Block, Paragraph, StatefulWidget, Widget, Wrap}
+    Frame, Terminal, backend::CrosstermBackend, layout::{Constraint, Layout, Rect}, widgets::{Block, Paragraph}
 };
 use std::{io::{self, Stdout}};
 use tokio::sync::mpsc;
 
-use crate::types::app::{AppEvent, AppState, Card};
+use crate::renderers::render_card;
+use crate::types::app::{AppEvent, AppState};
 
 pub fn terminal_setup() -> Result<Terminal<CrosstermBackend<Stdout>>> {
     enable_raw_mode().context("Failed to enable raw mode")?;
@@ -47,11 +48,13 @@ pub async fn tui_worker(ui_rx: &mut mpsc::Receiver<AppEvent>, ev_tx: &mpsc::Send
                             if let Some(card) = app.entities.get_mut(&entity_id){
                                 card.friendly_name = friendly_name;
                                 card.state = state;
+                                card.maybe_push_state_sample();
                             }
                         }
                         AppEvent::StateChanged { entity_id, state } => {
                             if let Some(card) = app.entities.get_mut(&entity_id){
                                 card.state = state;
+                                card.maybe_push_state_sample();
                             }
                         }
                         AppEvent::Status(s) => app.status = s,
@@ -150,8 +153,7 @@ fn draw_body(frame: &mut Frame, app: &mut AppState, area: &Rect) {
         for (col_i, &cell_area) in col_areas.iter().enumerate() {
             let card_i = start + col_i;
             if let Some(card) = app.entities.get_index(card_i) {
-                let mut is_selected = card_i == app.selected;
-                card.1.render(cell_area, frame.buffer_mut(), &mut is_selected);
+                render_card(frame, cell_area, card.1, card_i == app.selected);
             }
         }
     }
@@ -168,29 +170,4 @@ fn draw_footer(frame: &mut Frame, app: &AppState, area: &Rect) {
     );
 
     frame.render_widget(footer, *area);
-}
-
-impl StatefulWidget for &Card {
-    type State = bool;
-
-    fn render(self, area: Rect, buf: &mut Buffer, state: &mut Self::State) {
-        let border_style = if *state == true {
-            Style::default().fg(Color::Yellow).bold()
-        } else {
-            Style::default()
-        };
-
-        let block = Block::bordered()
-            .title(self.friendly_name.clone())
-            .title_bottom(if *state { "^" } else { "" })
-            .title_alignment(Alignment::Center)
-            .border_style(border_style);
-
-        let content = Paragraph::new(format!("{}\n{}\n{:?}", self.state, self.domain, self.services))
-            .block(block)
-            .style(border_style)
-            .wrap( Wrap { trim: true} );
-
-        content.render(area, buf);
-    }
 }

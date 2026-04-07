@@ -93,13 +93,7 @@ impl WSClient {
                 let domain = entity_id.split_once('.').unwrap().0.to_string();
                 Some((
                     entity_id,
-                    Card {
-                        state: String::new(),
-                        friendly_name: String::new(),
-                        domain: domain,
-                        r#type: c.r#type,
-                        services: vec![],
-                    },
+                    Card::new(domain, c.r#type),
                 ))
             })
             .collect())

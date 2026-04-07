@@ -1,5 +1,6 @@
 mod args;
 mod ha;
+mod renderers;
 mod tui;
 mod types { pub mod lovelace; pub mod events; pub mod responses; pub mod app;}
 
