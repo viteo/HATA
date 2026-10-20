@@ -173,7 +173,7 @@ impl WSClient {
     }
 }
 
-pub async fn ha_worker(ha_url: &str, ha_token: &str, ui_tx: &mpsc::Sender<AppEvent>, ev_rx: &mut mpsc::Receiver<AppEvent>) -> Result<()> {
+pub async fn ha_worker(ha_url: &str, ha_token: &str, dashboard: &str, ui_tx: &mpsc::Sender<AppEvent>, ev_rx: &mut mpsc::Receiver<AppEvent>) -> Result<()> {
     ui_tx.send(AppEvent::Status("Connecting...".to_string())).await?;
     let ws_url = build_ws_url(&ha_url)?;
 
@@ -184,7 +184,7 @@ pub async fn ha_worker(ha_url: &str, ha_token: &str, ui_tx: &mpsc::Sender<AppEve
 
     ui_tx.send(AppEvent::Status("Requesting entities".to_string())).await?;
 
-    let mut entities: Vec<(String, Card)> = ws_client.fetch_lovelace_dashboard("dashboard-tui").await?;
+    let mut entities: Vec<(String, Card)> = ws_client.fetch_lovelace_dashboard(dashboard).await?;
     for (id, card) in &mut entities {
         card.services = ws_client.fetch_services_for_entity(&id).await?;
     }
@@ -199,8 +199,19 @@ pub async fn ha_worker(ha_url: &str, ha_token: &str, ui_tx: &mpsc::Sender<AppEve
     loop {
         tokio::select! {
             ws_result = ws_client.socket.next() => {
-                if let Some(Ok(Message::Text(text))) = ws_result {
-                    match serde_json::from_str::<Response>(&text) {
+                let text = match ws_result {
+                    Some(Ok(Message::Text(text))) => text,
+                    Some(Ok(_)) => continue,
+                    Some(Err(err)) => {
+                        let _ = ui_tx.send(AppEvent::Error(format!("WebSocket error: {}", err))).await;
+                        break;
+                    }
+                    None => {
+                        let _ = ui_tx.send(AppEvent::Error("WebSocket closed by HA".to_string())).await;
+                        break;
+                    }
+                };
+                match serde_json::from_str::<Response>(&text) {
                         Ok(Response::Event(ws_event)) => {
                             match serde_json::from_value::<Event>(ws_event.event) {
                                 Ok(Event::NormalEvent(event)) => {
@@ -245,7 +256,6 @@ pub async fn ha_worker(ha_url: &str, ha_token: &str, ui_tx: &mpsc::Sender<AppEve
                         _ => {
                             ui_tx.send(AppEvent::Error("WS message unparsed".to_string())).await?;
                         }
-                    }
                 }
             },
             cmd = ev_rx.recv() => {
@@ -263,6 +273,7 @@ pub async fn ha_worker(ha_url: &str, ha_token: &str, ui_tx: &mpsc::Sender<AppEve
             }
         }
     }
+    Ok(())
 }
 
 fn build_ws_url(base: &str) -> Result<String> {

@@ -33,6 +33,7 @@ pub async fn tui_worker(ui_rx: &mut mpsc::Receiver<AppEvent>, ev_tx: &mpsc::Send
     let mut app = AppState::new();
     let mut input = EventStream::new();
 
+    terminal.clear()?;
     terminal.draw(|f| renderer_cb(f, &mut app))?;
 
     loop {
