@@ -10,6 +10,7 @@ pub enum RendererKind {
 
 #[derive(Debug)]
 pub struct Card {
+    pub entity_id: String,
     pub friendly_name: String,
     pub state: String,
     pub domain: String,
@@ -20,10 +21,11 @@ pub struct Card {
 }
 
 impl Card {
-    pub fn new(domain: String, card_type: String) -> Self {
+    pub fn new(entity_id: String, domain: String, card_type: String) -> Self {
         let renderer = Self::resolve_renderer(&domain, &card_type);
         let has_trend = renderer == RendererKind::NumericTrend;
         Self {
+            entity_id,
             friendly_name: String::new(),
             state: String::new(),
             domain,
@@ -138,5 +140,13 @@ impl AppState {
             status: "<connecting>".to_string(),
             last_error: None,
         }
+    }
+
+    /// All cards showing the given entity.
+    pub fn get_entity_cards(&mut self, entity_id: &str) -> Vec<&mut Card> {
+        self.entities
+            .values_mut()
+            .filter(|card| card.entity_id == entity_id)
+            .collect()
     }
 }

@@ -86,17 +86,29 @@ impl WSClient {
         self.socket.send(Message::Text(get_states_payload.to_string().into())).await?;
 
         let cards = extract_all_cards(&self.get_result().await?.unwrap());
-        Ok(cards
-            .into_iter()
-            .filter_map(|c| {
-                let entity_id = c.entity?;
-                let domain = entity_id.split_once('.').unwrap().0.to_string();
-                Some((
-                    entity_id,
-                    Card::new(domain, c.r#type),
-                ))
-            })
-            .collect())
+        let mut entities: Vec<(String, Card)> = Vec::new();
+        let mut seen: Vec<String> = Vec::new();
+        for card in cards {
+            let card_type = card.r#type.clone();
+            for entity_id in card.entity_ids() {
+                let Some((domain, _)) = entity_id.split_once('.') else {
+                    continue;
+                };
+                let domain = domain.to_string();
+                // key of the card has to be unique
+                let key = if seen.contains(&entity_id) {
+                    format!("{}#{}", entity_id, entities.len())
+                } else {
+                    seen.push(entity_id.clone());
+                    entity_id.clone()
+                };
+                entities.push((
+                    key,
+                    Card::new(entity_id, domain, card_type.clone()),
+                ));
+            }
+        }
+        Ok(entities)
     }
 
     pub async fn subscribe_entities(&mut self, entity_ids: Vec<&String>) -> Result<()> {
@@ -189,7 +201,16 @@ pub async fn ha_worker(ha_url: &str, ha_token: &str, dashboard: &str, ui_tx: &mp
         card.services = ws_client.fetch_services_for_entity(&id).await?;
     }
 
-    ws_client.subscribe_entities(entities.iter().map(|(id,_)| id).collect::<Vec<_>>()).await?;
+    // subscribe once per entity
+    let mut entity_ids: Vec<String> = Vec::new();
+    for (_, card) in &entities {
+        if !entity_ids.contains(&card.entity_id) {
+            entity_ids.push(card.entity_id.clone());
+        }
+    }
+    ws_client
+        .subscribe_entities(entity_ids.iter().collect::<Vec<_>>())
+        .await?;
 
     ui_tx.send(AppEvent::Snapshot { entities: entities }).await?;
     ui_tx.send(AppEvent::Status("Displaying".to_string())).await?;

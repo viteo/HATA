@@ -17,6 +17,29 @@ pub struct LovelaceCard {
     pub extra: HashMap<String, Value>,
 }
 
+impl LovelaceCard {
+    pub fn entity_ids(&self) -> Vec<String> {
+        let mut ids = Vec::new();
+        if let Some(entity) = &self.entity {
+            ids.push(entity.clone());
+        }
+        if let Some(entities) = &self.entities {
+            for entity in entities {
+                match entity {
+                    Value::String(id) => ids.push(id.clone()),
+                    Value::Object(obj) => {
+                        if let Some(Value::String(id)) = obj.get("entity") {
+                            ids.push(id.clone());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        ids
+    }
+}
+
 /// Returns a flat Vec of **every** card in the entire Lovelace config
 /// (including all nested ones). Owned structs, no cloning of the original JSON.
 pub fn extract_all_cards(root: &Value) -> Vec<LovelaceCard> {

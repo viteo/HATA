@@ -46,15 +46,15 @@ pub async fn tui_worker(ui_rx: &mut mpsc::Receiver<AppEvent>, ev_tx: &mpsc::Send
                             app.selected = 0;
                         },
                         AppEvent::EventAdded { entity_id, friendly_name, state } => {
-                            if let Some(card) = app.entities.get_mut(&entity_id){
-                                card.friendly_name = friendly_name;
-                                card.state = state;
+                            for card in app.get_entity_cards(&entity_id) {
+                                card.friendly_name = friendly_name.clone();
+                                card.state = state.clone();
                                 card.maybe_push_state_sample();
                             }
                         }
                         AppEvent::StateChanged { entity_id, state } => {
-                            if let Some(card) = app.entities.get_mut(&entity_id){
-                                card.state = state;
+                            for card in app.get_entity_cards(&entity_id) {
+                                card.state = state.clone();
                                 card.maybe_push_state_sample();
                             }
                         }
@@ -78,9 +78,10 @@ pub async fn tui_worker(ui_rx: &mut mpsc::Receiver<AppEvent>, ev_tx: &mpsc::Send
                             }
                             KeyCode::Enter => {
                                 if !app.entities.is_empty() {
-                                    let (entity_id, card) = app.entities.get_index(app.selected).unwrap();
+                                    let (_, card) = app.entities.get_index(app.selected).unwrap();
+                                    let entity_id = card.entity_id.clone();
                                     if let Some(service) = card.preferred_action() {
-                                        let _ = ev_tx.send(AppEvent::CallService { entity_id: entity_id.to_string(), service}).await;
+                                        let _ = ev_tx.send(AppEvent::CallService { entity_id, service}).await;
                                     } else {
                                         app.last_error = Some(format!("No supported service for {}", entity_id));
                                     }
