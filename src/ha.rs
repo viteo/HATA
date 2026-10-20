@@ -1,4 +1,4 @@
-use crate::types::{app::{AppEvent, Card}, events::*, lovelace::extract_all_cards, responses::Response};
+use crate::types::{app::{AppEvent, Card, local_renderer}, events::*, lovelace::{LovelaceCard, extract_all_cards}, responses::Response};
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
@@ -87,29 +87,7 @@ impl WSClient {
         self.socket.send(Message::Text(get_states_payload.to_string().into())).await?;
 
         let cards = extract_all_cards(&self.get_result().await?.unwrap());
-        let mut entities: Vec<(String, Card)> = Vec::new();
-        let mut seen: Vec<String> = Vec::new();
-        for card in cards {
-            let card_type = card.r#type.clone();
-            for entity in card.entity_configs() {
-                let Some((domain, _)) = entity.entity_id.split_once('.') else {
-                    continue;
-                };
-                let domain = domain.to_string();
-                // key of the card has to be unique
-                let key = if seen.contains(&entity.entity_id) {
-                    format!("{}#{}", entity.entity_id, entities.len())
-                } else {
-                    seen.push(entity.entity_id.clone());
-                    entity.entity_id.clone()
-                };
-                let mut card = Card::new(entity.entity_id, domain, card_type.clone());
-                card.friendly_name = entity.name.unwrap_or_default();
-                card.action = entity.action;
-                entities.push((key, card));
-            }
-        }
-        Ok(entities)
+        Ok(build_cards(&cards))
     }
 
     pub async fn subscribe_entities(&mut self, entity_ids: Vec<&String>) -> Result<()> {
@@ -193,6 +171,60 @@ impl WSClient {
 
         Ok(())
     }
+}
+
+fn build_cards(cards: &[LovelaceCard]) -> Vec<(String, Card)> {
+    let mut entities: Vec<(String, Card)> = Vec::new();
+    let mut seen: Vec<String> = Vec::new();
+
+    for card in cards {
+        let card_type = card.r#type.clone();
+        let card_entities = card.entity_configs();
+        let is_empty = card_entities.is_empty();
+
+        for entity in card_entities {
+            let Some((domain, _)) = entity.entity_id.split_once('.') else {
+                continue;
+            };
+            let domain = domain.to_string();
+            // key of the card has to be unique
+            let key = if seen.contains(&entity.entity_id) {
+                format!("{}#{}", entity.entity_id, entities.len())
+            } else {
+                seen.push(entity.entity_id.clone());
+                entity.entity_id.clone()
+            };
+            let mut card = Card::new(entity.entity_id, domain, card_type.clone());
+            card.friendly_name = entity.name.unwrap_or_default();
+            card.action = entity.action;
+            entities.push((key, card));
+        }
+
+        // a frontend card without entity
+        if is_empty {
+            if let Some(renderer) = local_renderer(&card_type) {
+                let entity_id = format!("local.{}", card_type);
+                let key = if seen.contains(&entity_id) {
+                    format!("{}#{}", entity_id, entities.len())
+                } else {
+                    seen.push(entity_id.clone());
+                    entity_id.clone()
+                };
+                let title = card.title.clone().unwrap_or_default();
+                let content = card
+                    .extra
+                    .get("content")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                let mut local_card = Card::new(entity_id, "local".to_string(), card_type.clone());
+                local_card.renderer = renderer;
+                local_card.friendly_name = title;
+                local_card.state = content.unwrap_or_default();
+                entities.push((key, local_card));
+            }
+        }
+    }
+    entities
 }
 
 pub async fn ha_worker(ha_url: &str, ha_token: &str, dashboard: &str, ui_tx: &mpsc::Sender<AppEvent>, ev_rx: &mut mpsc::Receiver<AppEvent>) -> Result<()> {

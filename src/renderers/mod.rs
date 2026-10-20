@@ -2,6 +2,7 @@ mod binary;
 mod clock;
 mod default;
 mod numeric_trend;
+mod text;
 
 use ratatui::{
     Frame,
@@ -31,6 +32,7 @@ pub fn render_card(frame: &mut Frame, area: Rect, card: &Card, is_selected: bool
         RendererKind::NumericTrend => {
             numeric_trend::render(frame, area, card, block, border_style)
         }
+        RendererKind::Markdown => text::render(frame, area, card, block, border_style),
         RendererKind::Default => default::render(frame, area, card, block, border_style),
     }
 }

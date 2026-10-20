@@ -6,7 +6,17 @@ pub enum RendererKind {
     Clock,
     Binary,
     NumericTrend,
+    Markdown,
     Default,
+}
+
+/// entirely frontend card has no state and need no entity
+pub fn local_renderer(card_type: &str) -> Option<RendererKind> {
+    match card_type {
+        "clock" => Some(RendererKind::Clock),
+        "markdown" => Some(RendererKind::Markdown),
+        _ => None,
+    }
 }
 
 #[derive(Debug)]

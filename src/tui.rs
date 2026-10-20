@@ -36,8 +36,11 @@ pub async fn tui_worker(ui_rx: &mut mpsc::Receiver<AppEvent>, ev_tx: &mpsc::Send
     terminal.clear()?;
     terminal.draw(|f| renderer_cb(f, &mut app))?;
 
+    let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
+
     loop {
         tokio::select! {
+            _ = tick.tick() => {}
             maybe_ev = ui_rx.recv() => {
                 if let Some(ev) = maybe_ev {
                     match ev {
