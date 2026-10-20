@@ -1,7 +1,8 @@
 use crate::types::{app::{AppEvent, Card}, events::*, lovelace::extract_all_cards, responses::Response};
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
-use serde_json::json;
+use serde_json::{json, Value};
+use std::collections::HashMap;
 use tokio::{net::TcpStream, sync::mpsc};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message};
 
@@ -125,22 +126,19 @@ impl WSClient {
         Ok(())
     }
 
-    pub async fn fetch_services_for_entity(&mut self, entity_id: &String) -> Result<Vec<String>> {
+    pub async fn fetch_services(&mut self) -> Result<HashMap<String, Vec<String>>> {
         self.id += 1;
         let fetch_services_payload = json!({
             "id": self.id,
-            "type": "get_services_for_target",
-            "target": {
-                "entity_id": [entity_id]
-            }
+            "type": "get_services"
         });
         self.socket.send(Message::Text(fetch_services_payload.to_string().into())).await?;
 
-        let services: Vec<String> = serde_json::from_value(self.get_result().await?.unwrap())?;
-        let domain = entity_id.split_once('.').unwrap().0;
-        Ok(services
+        let domains: HashMap<String, serde_json::Map<String, Value>> =
+            serde_json::from_value(self.get_result().await?.unwrap())?;
+        Ok(domains
             .into_iter()
-            .filter(|s| s.starts_with(domain))
+            .map(|(domain, services)| (domain, services.keys().cloned().collect()))
             .collect())
     }
 
@@ -197,8 +195,10 @@ pub async fn ha_worker(ha_url: &str, ha_token: &str, dashboard: &str, ui_tx: &mp
     ui_tx.send(AppEvent::Status("Requesting entities".to_string())).await?;
 
     let mut entities: Vec<(String, Card)> = ws_client.fetch_lovelace_dashboard(dashboard).await?;
-    for (id, card) in &mut entities {
-        card.services = ws_client.fetch_services_for_entity(&id).await?;
+    let services = ws_client.fetch_services().await?;
+    for (_, card) in &mut entities {
+        let domain = card.domain.clone();
+        card.services = services.get(&domain).cloned().unwrap_or_default();
     }
 
     // subscribe once per entity
