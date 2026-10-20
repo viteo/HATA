@@ -17,31 +17,90 @@ pub struct LovelaceCard {
     pub extra: HashMap<String, Value>,
 }
 
+/// The configuration of an entity inside a card.
+/// https://github.com/home-assistant/frontend/blob/dev/src/panels/lovelace/entity-rows/types.ts
+#[derive(Debug, Clone)]
+pub struct EntityConfig {
+    pub entity_id: String,
+    /// The name shown on the card, overrides the friendly name of the entity.
+    pub name: Option<String>,
+    /// The service to call when the card is activated, and its data.
+    pub action: Option<(String, Value)>,
+}
+
 impl LovelaceCard {
-    pub fn entity_ids(&self) -> Vec<String> {
-        let mut ids = Vec::new();
-        if let Some(entity) = &self.entity {
-            ids.push(entity.clone());
+    pub fn entity_configs(&self) -> Vec<EntityConfig> {
+        let mut configs = Vec::new();
+        if let Some(entity_id) = &self.entity {
+            configs.push(EntityConfig {
+                entity_id: entity_id.clone(),
+                name: None,
+                action: None,
+            });
         }
         if let Some(entities) = &self.entities {
             for entity in entities {
                 match entity {
-                    Value::String(id) => ids.push(id.clone()),
+                    Value::String(entity_id) => configs.push(EntityConfig {
+                        entity_id: entity_id.clone(),
+                        name: None,
+                        action: None,
+                    }),
                     Value::Object(obj) => {
-                        if let Some(Value::String(id)) = obj.get("entity") {
-                            ids.push(id.clone());
-                        }
+                        let Some(Value::String(entity_id)) = obj.get("entity") else {
+                            continue;
+                        };
+                        configs.push(EntityConfig {
+                            entity_id: entity_id.clone(),
+                            name: obj.get("name").and_then(|v| v.as_str()).map(str::to_string),
+                            action: obj.get("tap_action").and_then(parse_action),
+                        });
                     }
                     _ => {}
                 }
             }
         }
-        ids
+        configs
     }
 }
 
+/// The service to call and its data, if the action is a service call.
+/// https://github.com/home-assistant/frontend/blob/dev/src/data/lovelace/config/action.ts
+fn parse_action(value: &Value) -> Option<(String, Value)> {
+    let action = value.get("action")?.as_str()?;
+    if action != "call-service" && action != "perform-action" {
+        return None;
+    }
+    // "service" is the deprecated name of "perform_action"
+    let service = value
+        .get("perform_action")
+        .or_else(|| value.get("service"))?
+        .as_str()?
+        .to_string();
+    // "service_data" is the deprecated name of "data"
+    let mut data = value
+        .get("data")
+        .or_else(|| value.get("service_data"))
+        .cloned()
+        .unwrap_or(Value::Object(Default::default()));
+    if let Some(obj) = data.as_object_mut() {
+        if !obj.contains_key("entity_id") {
+            if let Some(target) = value
+                .get("target")
+                .and_then(|t| t.get("entity_id"))
+                .and_then(|v| v.as_str())
+            {
+                obj.insert(
+                    "entity_id".to_string(),
+                    Value::String(target.to_string()),
+                );
+            }
+        }
+    }
+    Some((service, data))
+}
+
 /// Returns a flat Vec of **every** card in the entire Lovelace config
-/// (including all nested ones). Owned structs, no cloning of the original JSON.
 pub fn extract_all_cards(root: &Value) -> Vec<LovelaceCard> {
     let mut cards = Vec::new();
     collect_cards(root, &mut cards);

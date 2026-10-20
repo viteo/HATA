@@ -47,7 +47,9 @@ pub async fn tui_worker(ui_rx: &mut mpsc::Receiver<AppEvent>, ev_tx: &mpsc::Send
                         },
                         AppEvent::EventAdded { entity_id, friendly_name, state } => {
                             for card in app.get_entity_cards(&entity_id) {
-                                card.friendly_name = friendly_name.clone();
+                                if card.friendly_name.is_empty() {
+                                    card.friendly_name = friendly_name.clone();
+                                }
                                 card.state = state.clone();
                                 card.maybe_push_state_sample();
                             }
@@ -80,8 +82,10 @@ pub async fn tui_worker(ui_rx: &mut mpsc::Receiver<AppEvent>, ev_tx: &mpsc::Send
                                 if !app.entities.is_empty() {
                                     let (_, card) = app.entities.get_index(app.selected).unwrap();
                                     let entity_id = card.entity_id.clone();
-                                    if let Some(service) = card.preferred_action() {
-                                        let _ = ev_tx.send(AppEvent::CallService { entity_id, service}).await;
+                                    let action = card.preferred_action();
+                                    let data = card.action_data();
+                                    if let Some(service) = action {
+                                        let _ = ev_tx.send(AppEvent::CallService { entity_id, service, data }).await;
                                     } else {
                                         app.last_error = Some(format!("No supported service for {}", entity_id));
                                     }
@@ -95,7 +99,7 @@ pub async fn tui_worker(ui_rx: &mut mpsc::Receiver<AppEvent>, ev_tx: &mpsc::Send
         }
         terminal.draw(|f| renderer_cb(f, &mut app))?;
     }
-    
+
     terminal_restore(&mut terminal)
 }
 

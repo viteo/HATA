@@ -1,4 +1,5 @@
 use indexmap::IndexMap;
+use serde_json::Value;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RendererKind {
@@ -12,6 +13,7 @@ pub enum RendererKind {
 pub struct Card {
     pub entity_id: String,
     pub friendly_name: String,
+    pub action: Option<(String, Value)>,
     pub state: String,
     pub domain: String,
     pub services: Vec<String>,
@@ -27,6 +29,7 @@ impl Card {
         Self {
             entity_id,
             friendly_name: String::new(),
+            action: None,
             state: String::new(),
             domain,
             services: vec![],
@@ -35,7 +38,7 @@ impl Card {
             history: if has_trend { Some(Vec::new()) } else { None },
         }
     }
-    
+
     fn resolve_renderer(domain: &str, card_type: &str) -> RendererKind {
         if card_type.contains("clock") {
             return RendererKind::Clock;
@@ -56,6 +59,10 @@ impl Card {
     }
 
     pub fn preferred_action(&self) -> Option<String> {
+        // an action configured on the card wins over guesswork
+        if let Some((service, _)) = &self.action {
+            return Some(service.clone());
+        }
 
         const GENERIC_PRIORITY: &[&str] = &[
             "toggle",
@@ -86,6 +93,10 @@ impl Card {
         self.services.iter().any(|svc| {
             svc.contains(service_name)
         })
+    }
+
+    pub fn action_data(&self) -> Option<Value> {
+        self.action.as_ref().map(|(_, data)| data.clone())
     }
 
     pub fn maybe_push_state_sample(&mut self) {
@@ -120,7 +131,7 @@ pub enum AppEvent {
     Error(String),
 
     // from ui
-    CallService { entity_id: String, service: String },
+    CallService { entity_id: String, service: String, data: Option<Value> },
 }
 
 pub struct AppState {

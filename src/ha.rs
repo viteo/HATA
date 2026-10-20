@@ -91,22 +91,22 @@ impl WSClient {
         let mut seen: Vec<String> = Vec::new();
         for card in cards {
             let card_type = card.r#type.clone();
-            for entity_id in card.entity_ids() {
-                let Some((domain, _)) = entity_id.split_once('.') else {
+            for entity in card.entity_configs() {
+                let Some((domain, _)) = entity.entity_id.split_once('.') else {
                     continue;
                 };
                 let domain = domain.to_string();
                 // key of the card has to be unique
-                let key = if seen.contains(&entity_id) {
-                    format!("{}#{}", entity_id, entities.len())
+                let key = if seen.contains(&entity.entity_id) {
+                    format!("{}#{}", entity.entity_id, entities.len())
                 } else {
-                    seen.push(entity_id.clone());
-                    entity_id.clone()
+                    seen.push(entity.entity_id.clone());
+                    entity.entity_id.clone()
                 };
-                entities.push((
-                    key,
-                    Card::new(entity_id, domain, card_type.clone()),
-                ));
+                let mut card = Card::new(entity.entity_id, domain, card_type.clone());
+                card.friendly_name = entity.name.unwrap_or_default();
+                card.action = entity.action;
+                entities.push((key, card));
             }
         }
         Ok(entities)
@@ -142,16 +142,28 @@ impl WSClient {
             .collect())
     }
 
-    pub async fn call_service(&mut self, service: &str, entity_id: &str) -> Result<()> {
+    pub async fn call_service(&mut self, service: &str, entity_id: &str, data: Option<Value>) -> Result<()> {
         self.id += 1;
+        // a service is either "domain.service" or a plain service name of the domain of the entity
+        let (domain, name) = match service.split_once('.') {
+            Some((domain, name)) => (domain.to_string(), name.to_string()),
+            None => (
+                entity_id
+                    .split_once('.')
+                    .map(|(domain, _)| domain.to_string())
+                    .unwrap_or_default(),
+                service.to_string(),
+            ),
+        };
         let call_service_payload = json!({
             "id": self.id,
             "type": "call_service",
-            "domain": entity_id.split_once('.').unwrap().0,
-            "service": service,
+            "domain": domain,
+            "service": name,
             "target": {
                 "entity_id": entity_id
-            }
+            },
+            "service_data": data.unwrap_or(json!({}))
         });
         self.socket.send(Message::Text(call_service_payload.to_string().into())).await?;
 
@@ -282,8 +294,8 @@ pub async fn ha_worker(ha_url: &str, ha_token: &str, dashboard: &str, ui_tx: &mp
             cmd = ev_rx.recv() => {
                 if let Some(cmd) = cmd {
                     match cmd {
-                        AppEvent::CallService { entity_id, service } => {
-                            ws_client.call_service(&service, &entity_id).await?;
+                        AppEvent::CallService { entity_id, service, data } => {
+                            ws_client.call_service(&service, &entity_id, data).await?;
                         },
                         _ => {},
                     }
