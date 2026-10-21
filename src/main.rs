@@ -2,7 +2,7 @@ mod args;
 mod ha;
 mod renderers;
 mod tui;
-mod types { pub mod lovelace; pub mod events; pub mod responses; pub mod app;}
+mod types { pub mod actions; pub mod lovelace; pub mod events; pub mod responses; pub mod app;}
 
 use anyhow::Result;
 use tokio::sync::mpsc;
@@ -16,10 +16,10 @@ use crate::types::app::AppEvent;
 async fn main() -> Result<()> {
     let args = Args::parse()?;
     let (ui_tx, mut ui_rx) = mpsc::channel::<AppEvent>(256);
-    let (ev_tx, mut ev_rx) = mpsc::channel::<AppEvent>(256);
-    
+    let (cmd_tx, mut cmd_rx) = mpsc::channel::<AppEvent>(256);
+
     tokio::spawn(async move {
-        if let Err(e) = ha_worker(&args.ha_url, &args.ha_token, &args.dashboard, &ui_tx, &mut ev_rx).await {
+        if let Err(e) = ha_worker(&args.ha_url, &args.ha_token, &args.dashboard, &ui_tx, &mut cmd_rx).await {
             // report error back to UI
             let full_msg = e
                 .chain()
@@ -30,5 +30,5 @@ async fn main() -> Result<()> {
         }
     });
 
-    tui_worker(&mut ui_rx, &ev_tx).await
+    tui_worker(&mut ui_rx, &cmd_tx).await
 }

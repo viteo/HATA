@@ -5,7 +5,7 @@ use std::collections::HashMap;
 // https://github.com/home-assistant/frontend/blob/master/src/data/lovelace/config/types.ts
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
-pub struct LovelaceCard {
+pub struct LovelaceCardConfig {
     #[serde(rename = "type")]
     pub r#type: String,
     pub title: Option<String>,
@@ -21,39 +21,39 @@ pub struct LovelaceCard {
 /// https://github.com/home-assistant/frontend/blob/dev/src/panels/lovelace/entity-rows/types.ts
 #[derive(Debug, Clone)]
 pub struct EntityConfig {
-    pub entity_id: String,
+    pub entity: String,
     /// The name shown on the card, overrides the friendly name of the entity.
     pub name: Option<String>,
     /// The service to call when the card is activated, and its data.
-    pub action: Option<(String, Value)>,
+    pub tap_action: Option<(String, Value)>,
 }
 
-impl LovelaceCard {
+impl LovelaceCardConfig {
     pub fn entity_configs(&self) -> Vec<EntityConfig> {
         let mut configs = Vec::new();
-        if let Some(entity_id) = &self.entity {
+        if let Some(entity) = &self.entity {
             configs.push(EntityConfig {
-                entity_id: entity_id.clone(),
+                entity: entity.clone(),
                 name: None,
-                action: None,
+                tap_action: None,
             });
         }
         if let Some(entities) = &self.entities {
             for entity in entities {
                 match entity {
-                    Value::String(entity_id) => configs.push(EntityConfig {
-                        entity_id: entity_id.clone(),
+                    Value::String(entity) => configs.push(EntityConfig {
+                        entity: entity.clone(),
                         name: None,
-                        action: None,
+                        tap_action: None,
                     }),
                     Value::Object(obj) => {
-                        let Some(Value::String(entity_id)) = obj.get("entity") else {
+                        let Some(Value::String(entity)) = obj.get("entity") else {
                             continue;
                         };
                         configs.push(EntityConfig {
-                            entity_id: entity_id.clone(),
+                            entity: entity.clone(),
                             name: obj.get("name").and_then(|v| v.as_str()).map(str::to_string),
-                            action: obj.get("tap_action").and_then(parse_action),
+                            tap_action: obj.get("tap_action").and_then(parse_action),
                         });
                     }
                     _ => {}
@@ -101,20 +101,20 @@ fn parse_action(value: &Value) -> Option<(String, Value)> {
 }
 
 /// Returns a flat Vec of **every** card in the entire Lovelace config
-pub fn extract_all_cards(root: &Value) -> Vec<LovelaceCard> {
+pub fn extract_all_cards(root: &Value) -> Vec<LovelaceCardConfig> {
     let mut cards = Vec::new();
     collect_cards(root, &mut cards);
     cards
 }
 
 /// Recursively look for card objects in json
-fn collect_cards(value: &Value, found_cards: &mut Vec<LovelaceCard>) {
+fn collect_cards(value: &Value, found_cards: &mut Vec<LovelaceCardConfig>) {
     match value {
         Value::Object(obj) => {
             // "cards" array
             if let Some(Value::Array(cards_arr)) = obj.get("cards") {
                 for card_value in cards_arr {
-                    if let Ok(card) = serde_json::from_value::<LovelaceCard>(card_value.clone()) {
+                    if let Ok(card) = serde_json::from_value::<LovelaceCardConfig>(card_value.clone()) {
                         found_cards.push(card);
                     }
                     collect_cards(card_value, found_cards); // recurse deeper
@@ -123,7 +123,7 @@ fn collect_cards(value: &Value, found_cards: &mut Vec<LovelaceCard>) {
 
             // singular card
             if let Some(card_val) = obj.get("card") {
-                if let Ok(card) = serde_json::from_value::<LovelaceCard>(card_val.clone()) {
+                if let Ok(card) = serde_json::from_value::<LovelaceCardConfig>(card_val.clone()) {
                     found_cards.push(card);
                 }
                 collect_cards(card_val, found_cards);

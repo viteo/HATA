@@ -22,9 +22,9 @@ pub fn render(frame: &mut Frame, area: Rect, card: &Card, block: Block, border_s
         .block(block);
     frame.render_widget(value, value_area);
 
-    if let Some(history) = &card.history {
-        if history.len() >= 2 {
-            let sparkline_data = normalize_history(history);
+    if let Some(samples) = &card.samples {
+        if samples.len() >= 2 {
+            let sparkline_data = normalize_samples(samples);
             let sparkline = Sparkline::default()
                 .data(&sparkline_data)
                 .style(Style::default().fg(Color::Green));
@@ -32,7 +32,7 @@ pub fn render(frame: &mut Frame, area: Rect, card: &Card, block: Block, border_s
         }
     }
 
-    let action = card.preferred_action().unwrap_or_else(|| "n/a".to_string());
+    let action = card.toggle_service().unwrap_or_else(|| "n/a".to_string());
     let details = Paragraph::new(format!("{}\nact: {}", card.domain, action))
         .alignment(Alignment::Center)
         .style(Style::default().fg(Color::Gray))
@@ -40,10 +40,10 @@ pub fn render(frame: &mut Frame, area: Rect, card: &Card, block: Block, border_s
     frame.render_widget(details, details_area);
 }
 
-fn normalize_history(history: &[f32]) -> Vec<u64> {
+fn normalize_samples(samples: &[f32]) -> Vec<u64> {
     let mut min = f32::INFINITY;
     let mut max = f32::NEG_INFINITY;
-    for &v in history {
+    for &v in samples {
         if v < min {
             min = v;
         }
@@ -52,9 +52,9 @@ fn normalize_history(history: &[f32]) -> Vec<u64> {
         }
     }
     if (max - min).abs() < f32::EPSILON {
-        return vec![50; history.len()];
+        return vec![50; samples.len()];
     }
-    history
+    samples
         .iter()
         .map(|v| (((v - min) / (max - min)) * 100.0).round() as u64)
         .collect()

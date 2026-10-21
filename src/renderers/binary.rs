@@ -13,7 +13,7 @@ pub fn render(frame: &mut Frame, area: Rect, card: &Card, block: Block, border_s
         "off" | "closed" | "not_home" | "clear" => (Color::DarkGray, "OFF"),
         _ => (Color::Yellow, card.state.as_str()),
     };
-    let action = card.preferred_action().unwrap_or_else(|| "n/a".to_string());
+    let action = card.toggle_service().unwrap_or_else(|| "n/a".to_string());
     let widget = Paragraph::new(format!("{}\n{}\nact: {}", label, card.domain, action))
         .alignment(Alignment::Center)
         .block(block)

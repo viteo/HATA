@@ -28,13 +28,13 @@ pub fn terminal_restore(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Re
     terminal.show_cursor().context("Failed to restore cursor")
 }
 
-pub async fn tui_worker(ui_rx: &mut mpsc::Receiver<AppEvent>, ev_tx: &mpsc::Sender<AppEvent>) -> Result<()> {
+pub async fn tui_worker(ui_rx: &mut mpsc::Receiver<AppEvent>, cmd_tx: &mpsc::Sender<AppEvent>) -> Result<()> {
     let mut terminal = terminal_setup()?;
     let mut app = AppState::new();
     let mut input = EventStream::new();
 
     terminal.clear()?;
-    terminal.draw(|f| renderer_cb(f, &mut app))?;
+    terminal.draw(|f| draw(f, &mut app))?;
 
     let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
 
@@ -44,23 +44,23 @@ pub async fn tui_worker(ui_rx: &mut mpsc::Receiver<AppEvent>, ev_tx: &mpsc::Send
             maybe_ev = ui_rx.recv() => {
                 if let Some(ev) = maybe_ev {
                     match ev {
-                        AppEvent::Snapshot { entities } => {
-                            app.entities.extend(entities);
+                        AppEvent::Snapshot { cards } => {
+                            app.cards = cards;
                             app.selected = 0;
                         },
-                        AppEvent::EventAdded { entity_id, friendly_name, state } => {
-                            for card in app.get_entity_cards(&entity_id) {
-                                if card.friendly_name.is_empty() {
-                                    card.friendly_name = friendly_name.clone();
+                        AppEvent::EntityAdded { entity_id, name, state } => {
+                            for card in app.cards_for_entity(&entity_id) {
+                                if card.name.is_empty() {
+                                    card.name = name.clone();
                                 }
                                 card.state = state.clone();
-                                card.maybe_push_state_sample();
+                                card.push_sample();
                             }
                         }
                         AppEvent::StateChanged { entity_id, state } => {
-                            for card in app.get_entity_cards(&entity_id) {
+                            for card in app.cards_for_entity(&entity_id) {
                                 card.state = state.clone();
-                                card.maybe_push_state_sample();
+                                card.push_sample();
                             }
                         }
                         AppEvent::Status(s) => app.status = s,
@@ -76,19 +76,19 @@ pub async fn tui_worker(ui_rx: &mut mpsc::Receiver<AppEvent>, ev_tx: &mpsc::Send
                         match key.code {
                             KeyCode::Char('q') => break,
                             KeyCode::Up => {
-                                app.selected = if app.selected == 0 { app.entities.len() - 1} else { app.selected - 1 };
+                                app.selected = if app.selected == 0 { app.cards.len() - 1} else { app.selected - 1 };
                             }
                             KeyCode::Down => {
-                                app.selected = if app.selected >= app.entities.len() - 1 { 0 } else { app.selected + 1 };
+                                app.selected = if app.selected >= app.cards.len() - 1 { 0 } else { app.selected + 1 };
                             }
                             KeyCode::Enter => {
-                                if !app.entities.is_empty() {
-                                    let (_, card) = app.entities.get_index(app.selected).unwrap();
+                                if !app.cards.is_empty() {
+                                    let card = &app.cards[app.selected];
                                     let entity_id = card.entity_id.clone();
-                                    let action = card.preferred_action();
-                                    let data = card.action_data();
+                                    let action = card.toggle_service();
+                                    let data = card.tap_action_data();
                                     if let Some(service) = action {
-                                        let _ = ev_tx.send(AppEvent::CallService { entity_id, service, data }).await;
+                                        let _ = cmd_tx.send(AppEvent::CallService { entity_id, service, data }).await;
                                     } else {
                                         app.last_error = Some(format!("No supported service for {}", entity_id));
                                     }
@@ -100,13 +100,13 @@ pub async fn tui_worker(ui_rx: &mut mpsc::Receiver<AppEvent>, ev_tx: &mpsc::Send
                 }
             }
         }
-        terminal.draw(|f| renderer_cb(f, &mut app))?;
+        terminal.draw(|f| draw(f, &mut app))?;
     }
 
     terminal_restore(&mut terminal)
 }
 
-fn renderer_cb(frame: &mut Frame, app: &mut AppState) {
+fn draw(frame: &mut Frame, app: &mut AppState) {
     let [header ,body, footer] = Layout::vertical([
             Constraint::Length(3),
             Constraint::Min(1),
@@ -134,7 +134,7 @@ fn draw_body(frame: &mut Frame, app: &mut AppState, area: &Rect) {
     const CARD_HEIGHT: u16 = 10;
     const SPACING: u16 = 0;
 
-    if app.entities.is_empty() {
+    if app.cards.is_empty() {
         return;
     }
 
@@ -144,7 +144,7 @@ fn draw_body(frame: &mut Frame, app: &mut AppState, area: &Rect) {
         ((area.width + SPACING) / (CARD_WIDTH + SPACING)) as usize
     };
 
-    let rows_total = (app.entities.len() + cols_total - 1) / cols_total;
+    let rows_total = (app.cards.len() + cols_total - 1) / cols_total;
 
     let row_areas = Layout::vertical(vec![Constraint::Length(CARD_HEIGHT); rows_total])
         .spacing(SPACING)
@@ -152,18 +152,16 @@ fn draw_body(frame: &mut Frame, app: &mut AppState, area: &Rect) {
 
     for (row_i, &row_area) in row_areas.iter().enumerate() {
         let start = row_i * cols_total;
-        let end = (start + cols_total).min(app.entities.len());
-        let row_entities = &app.entities[start..end];
+        let end = (start + cols_total).min(app.cards.len());
+        let row_cards = &app.cards[start..end];
 
-        let col_areas = Layout::horizontal(vec![Constraint::Length(CARD_WIDTH); row_entities.len()])
+        let col_areas = Layout::horizontal(vec![Constraint::Length(CARD_WIDTH); row_cards.len()])
             .spacing(SPACING)
             .split(row_area);
 
         for (col_i, &cell_area) in col_areas.iter().enumerate() {
             let card_i = start + col_i;
-            if let Some(card) = app.entities.get_index(card_i) {
-                render_card(frame, cell_area, card.1, card_i == app.selected);
-            }
+            render_card(frame, cell_area, &app.cards[card_i], card_i == app.selected);
         }
     }
 }

@@ -1,4 +1,8 @@
-use crate::types::{app::{AppEvent, Card, local_renderer}, events::*, lovelace::{LovelaceCard, extract_all_cards}, responses::Response};
+use crate::types::{
+    app::{AppEvent, Card, ConnectionStatus, local_renderer},
+    events::*,
+    lovelace::{LovelaceCardConfig, extract_all_cards},
+    responses::Response};
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
@@ -6,14 +10,15 @@ use std::collections::HashMap;
 use tokio::{net::TcpStream, sync::mpsc};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message};
 
-struct WSClient {
+/// The websocket connection to Home Assistant.
+struct WebSockConnection {
     id: u64,
     socket: WebSocketStream<MaybeTlsStream<TcpStream>>,
     ha_version: String,
 }
 
 #[allow(dead_code)]
-impl WSClient {
+impl WebSockConnection {
     pub async fn new(ws_url: &str) -> Result<Self> {
         let (mut socket, _) = connect_async(ws_url).await.context(format!("Failed to connect to \"{}\"", ws_url))?;
 
@@ -58,30 +63,19 @@ impl WSClient {
         });
         self.socket.send(Message::Text(get_states_payload.to_string().into())).await?;
 
-        let states: Vec<State> = serde_json::from_value(self.get_result().await?.unwrap())?;
+        let states: Vec<HassEntity> = serde_json::from_value(self.get_result().await?.unwrap())?;
         Ok(states
             .iter()
             .map(|st| (st.entity_id.clone(), st.state.clone()))
             .collect())
     }
 
-    pub async fn subscribe_all_state_changes(&mut self) -> Result<()> {
-        // Subscribe to all state_changed events
-        let subscribe_payload = json!({
-            "id": self.id,
-            "type": "subscribe_events",
-            "event_type": "state_changed"
-        });
-        self.socket.send(Message::Text(subscribe_payload.to_string().into())).await?;
-        Ok(())
-    }
-
-    pub async fn fetch_lovelace_dashboard(&mut self, dashboard_name: &str) -> Result<Vec<(String, Card)>> {
+    pub async fn fetch_lovelace_config(&mut self, url_path: &str) -> Result<Vec<Card>> {
         self.id += 1;
         let get_states_payload = json!({
             "id": self.id,
             "type": "lovelace/config",
-            "url_path": dashboard_name,
+            "url_path": url_path,
             "force": false
         });
         self.socket.send(Message::Text(get_states_payload.to_string().into())).await?;
@@ -126,10 +120,7 @@ impl WSClient {
         let (domain, name) = match service.split_once('.') {
             Some((domain, name)) => (domain.to_string(), name.to_string()),
             None => (
-                entity_id
-                    .split_once('.')
-                    .map(|(domain, _)| domain.to_string())
-                    .unwrap_or_default(),
+                service_domain(entity_id),
                 service.to_string(),
             ),
         };
@@ -173,9 +164,8 @@ impl WSClient {
     }
 }
 
-fn build_cards(cards: &[LovelaceCard]) -> Vec<(String, Card)> {
-    let mut entities: Vec<(String, Card)> = Vec::new();
-    let mut seen: Vec<String> = Vec::new();
+fn build_cards(cards: &[LovelaceCardConfig]) -> Vec<Card> {
+    let mut entities: Vec<Card> = Vec::new();
 
     for card in cards {
         let card_type = card.r#type.clone();
@@ -183,33 +173,20 @@ fn build_cards(cards: &[LovelaceCard]) -> Vec<(String, Card)> {
         let is_empty = card_entities.is_empty();
 
         for entity in card_entities {
-            let Some((domain, _)) = entity.entity_id.split_once('.') else {
+            let Some((domain, _)) = entity.entity.split_once('.') else {
                 continue;
             };
             let domain = domain.to_string();
-            // key of the card has to be unique
-            let key = if seen.contains(&entity.entity_id) {
-                format!("{}#{}", entity.entity_id, entities.len())
-            } else {
-                seen.push(entity.entity_id.clone());
-                entity.entity_id.clone()
-            };
-            let mut card = Card::new(entity.entity_id, domain, card_type.clone());
-            card.friendly_name = entity.name.unwrap_or_default();
-            card.action = entity.action;
-            entities.push((key, card));
+            let mut card = Card::new(entity.entity.clone(), domain, card_type.clone());
+            card.name = entity.name.unwrap_or_default();
+            card.tap_action = entity.tap_action;
+            entities.push(card);
         }
 
         // a frontend card without entity
         if is_empty {
             if let Some(renderer) = local_renderer(&card_type) {
                 let entity_id = format!("local.{}", card_type);
-                let key = if seen.contains(&entity_id) {
-                    format!("{}#{}", entity_id, entities.len())
-                } else {
-                    seen.push(entity_id.clone());
-                    entity_id.clone()
-                };
                 let title = card.title.clone().unwrap_or_default();
                 let content = card
                     .extra
@@ -218,36 +195,50 @@ fn build_cards(cards: &[LovelaceCard]) -> Vec<(String, Card)> {
                     .map(str::to_string);
                 let mut local_card = Card::new(entity_id, "local".to_string(), card_type.clone());
                 local_card.renderer = renderer;
-                local_card.friendly_name = title;
+                local_card.name = title;
                 local_card.state = content.unwrap_or_default();
-                entities.push((key, local_card));
+                entities.push(local_card);
             }
         }
     }
     entities
 }
 
-pub async fn ha_worker(ha_url: &str, ha_token: &str, dashboard: &str, ui_tx: &mpsc::Sender<AppEvent>, ev_rx: &mut mpsc::Receiver<AppEvent>) -> Result<()> {
-    ui_tx.send(AppEvent::Status("Connecting...".to_string())).await?;
+/// The domain the services of the entity live in.
+fn service_domain(entity_id: &str) -> String {
+    let domain = entity_id
+        .split_once('.')
+        .map(|(domain, _)| domain.to_string())
+        .unwrap_or_default();
+    if domain == "group" {
+        "homeassistant".to_string()
+    } else {
+        domain
+    }
+}
+
+pub async fn ha_worker(ha_url: &str, ha_token: &str, dashboard: &str, ui_tx: &mpsc::Sender<AppEvent>, cmd_rx: &mut mpsc::Receiver<AppEvent>) -> Result<()> {
+    ui_tx.send(AppEvent::Status(ConnectionStatus::Connecting)).await?;
     let ws_url = build_ws_url(&ha_url)?;
 
-    let mut ws_client = WSClient::new(&ws_url).await?;
-    ui_tx.send(AppEvent::Status(format!("Connected to HA v{}", ws_client.ha_version))).await?;
+    let mut ws_client = WebSockConnection::new(&ws_url).await?;
 
-    ws_client.auth_longlivedtoken(ha_token).await?;
+    if let Err(e) = ws_client.auth_longlivedtoken(ha_token).await {
+        let _ = ui_tx.send(AppEvent::Status(ConnectionStatus::AuthInvalid)).await;
+        return Err(e);
+    }
+    ui_tx.send(AppEvent::Status(ConnectionStatus::Connected(ws_client.ha_version.clone()))).await?;
 
-    ui_tx.send(AppEvent::Status("Requesting entities".to_string())).await?;
-
-    let mut entities: Vec<(String, Card)> = ws_client.fetch_lovelace_dashboard(dashboard).await?;
+    let mut cards: Vec<Card> = ws_client.fetch_lovelace_config(dashboard).await?;
     let services = ws_client.fetch_services().await?;
-    for (_, card) in &mut entities {
+    for card in &mut cards {
         let domain = card.domain.clone();
         card.services = services.get(&domain).cloned().unwrap_or_default();
     }
 
     // subscribe once per entity
     let mut entity_ids: Vec<String> = Vec::new();
-    for (_, card) in &entities {
+    for card in &cards {
         if !entity_ids.contains(&card.entity_id) {
             entity_ids.push(card.entity_id.clone());
         }
@@ -256,8 +247,7 @@ pub async fn ha_worker(ha_url: &str, ha_token: &str, dashboard: &str, ui_tx: &mp
         .subscribe_entities(entity_ids.iter().collect::<Vec<_>>())
         .await?;
 
-    ui_tx.send(AppEvent::Snapshot { entities: entities }).await?;
-    ui_tx.send(AppEvent::Status("Displaying".to_string())).await?;
+    ui_tx.send(AppEvent::Snapshot { cards: cards }).await?;
 
     let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(30));
     // event loop
@@ -269,10 +259,12 @@ pub async fn ha_worker(ha_url: &str, ha_token: &str, dashboard: &str, ui_tx: &mp
                     Some(Ok(_)) => continue,
                     Some(Err(err)) => {
                         let _ = ui_tx.send(AppEvent::Error(format!("WebSocket error: {}", err))).await;
+                        let _ = ui_tx.send(AppEvent::Status(ConnectionStatus::Disconnected)).await;
                         break;
                     }
                     None => {
                         let _ = ui_tx.send(AppEvent::Error("WebSocket closed by HA".to_string())).await;
+                        let _ = ui_tx.send(AppEvent::Status(ConnectionStatus::Disconnected)).await;
                         break;
                     }
                 };
@@ -291,8 +283,8 @@ pub async fn ha_worker(ha_url: &str, ha_token: &str, dashboard: &str, ui_tx: &mp
                                 Ok(Event::CompressedEvent(event)) => {
                                     if let Some(added) = event.added {
                                         for (entity_id, state) in added{
-                                            ui_tx.send(AppEvent::EventAdded {
-                                                friendly_name : state.attributes
+                                            ui_tx.send(AppEvent::EntityAdded {
+                                                name : state.attributes
                                                     .as_ref()
                                                     .and_then(|attr| attr.get("friendly_name"))
                                                     .and_then(|value| value.as_str())
@@ -323,7 +315,7 @@ pub async fn ha_worker(ha_url: &str, ha_token: &str, dashboard: &str, ui_tx: &mp
                         }
                 }
             },
-            cmd = ev_rx.recv() => {
+            cmd = cmd_rx.recv() => {
                 if let Some(cmd) = cmd {
                     match cmd {
                         AppEvent::CallService { entity_id, service, data } => {

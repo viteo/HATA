@@ -1,5 +1,6 @@
-use indexmap::IndexMap;
 use serde_json::Value;
+
+use super::actions;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RendererKind {
@@ -19,33 +20,38 @@ pub fn local_renderer(card_type: &str) -> Option<RendererKind> {
     }
 }
 
+/// A single tile of the dashboard: the configuration of a lovelace card
+/// together with the state of the entity it shows.
 #[derive(Debug)]
 pub struct Card {
     pub entity_id: String,
-    pub friendly_name: String,
-    pub action: Option<(String, Value)>,
+    /// The name shown on the card.
+    pub name: String,
+    /// The service to call when the card is activated, and its data.
+    pub tap_action: Option<(String, Value)>,
     pub state: String,
     pub domain: String,
     pub services: Vec<String>,
     pub renderer: RendererKind,
-    pub has_trend: bool,
-    pub history: Option<Vec<f32>>,
+    pub samples: Option<Vec<f32>>,
 }
 
 impl Card {
     pub fn new(entity_id: String, domain: String, card_type: String) -> Self {
         let renderer = Self::resolve_renderer(&domain, &card_type);
-        let has_trend = renderer == RendererKind::NumericTrend;
         Self {
             entity_id,
-            friendly_name: String::new(),
-            action: None,
+            name: String::new(),
+            tap_action: None,
             state: String::new(),
             domain,
             services: vec![],
             renderer,
-            has_trend,
-            history: if has_trend { Some(Vec::new()) } else { None },
+            samples: if renderer == RendererKind::NumericTrend {
+                Some(Vec::new())
+            } else {
+                None
+            },
         }
     }
 
@@ -68,58 +74,36 @@ impl Card {
         RendererKind::Default
     }
 
-    pub fn preferred_action(&self) -> Option<String> {
-        // an action configured on the card wins over guesswork
-        if let Some((service, _)) = &self.action {
+    /// The service to call to toggle the entity.
+    pub fn toggle_service(&self) -> Option<String> {
+        // an action configured on the card wins over the guesswork
+        if let Some((service, _)) = &self.tap_action {
             return Some(service.clone());
         }
-
-        const GENERIC_PRIORITY: &[&str] = &[
-            "toggle",
-            "press",
-            "trigger",
-            "execute",
-            "increment",
-            "media_play_pause",
-            "next_track",
-            "open",
-            "start",
-            "turn_on",
-            "close",
-            "stop",
-            "turn_off",
-        ];
-
-        for service in GENERIC_PRIORITY {
-            if self.supports_service(service) {
-                return Some(service.to_string());
-            }
+        // a toggle service switches the entity atomically
+        if self.services.iter().any(|service| service == "toggle") {
+            return Some("toggle".to_string());
         }
-
-        self.services.first().cloned()
+        // the per domain action of the web app, if the domain has it
+        let service = actions::toggle_action(&self.domain, !actions::is_off_state(&self.state));
+        if self.services.iter().any(|available| available == service) {
+            return Some(service.to_string());
+        }
+        None
     }
 
-    fn supports_service(&self, service_name: &str) -> bool {
-        self.services.iter().any(|svc| {
-            svc.contains(service_name)
-        })
+    pub fn tap_action_data(&self) -> Option<Value> {
+        self.tap_action.as_ref().map(|(_, data)| data.clone())
     }
 
-    pub fn action_data(&self) -> Option<Value> {
-        self.action.as_ref().map(|(_, data)| data.clone())
-    }
-
-    pub fn maybe_push_state_sample(&mut self) {
-        if !self.has_trend {
+    pub fn push_sample(&mut self) {
+        let Some(samples) = self.samples.as_mut() else {
             return;
-        }
+        };
         let Ok(v) = self.state.parse::<f32>() else {
             return;
         };
 
-        let Some(samples) = self.history.as_mut() else {
-            return;
-        };
         samples.push(v);
         const MAX_SAMPLES: usize = 32;
         if samples.len() > MAX_SAMPLES {
@@ -129,15 +113,37 @@ impl Card {
     }
 }
 
+/// The status of the connection to Home Assistant.
+/// Mirrors `ConnectionStatus` of the web app.
+#[derive(Debug)]
+pub enum ConnectionStatus {
+    Connecting,
+    /// Connected to Home Assistant, with its version.
+    Connected(String),
+    AuthInvalid,
+    Disconnected,
+}
+
+impl std::fmt::Display for ConnectionStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Connecting => write!(f, "connecting"),
+            Self::Connected(version) => write!(f, "connected ({version})"),
+            Self::AuthInvalid => write!(f, "auth invalid"),
+            Self::Disconnected => write!(f, "disconnected"),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum AppEvent {
     // from backend
     Snapshot {
-        entities: Vec<(String, Card)>,
+        cards: Vec<Card>,
     },
     StateChanged { entity_id: String, state: String },
-    EventAdded { entity_id: String, friendly_name: String, state: String },
-    Status(String),
+    EntityAdded { entity_id: String, name: String, state: String },
+    Status(ConnectionStatus),
     Error(String),
 
     // from ui
@@ -146,9 +152,9 @@ pub enum AppEvent {
 
 pub struct AppState {
     pub title: &'static str,
-    pub entities: IndexMap<String, Card>, // entity_id -> card
+    pub cards: Vec<Card>,
     pub selected: usize,
-    pub status: String,
+    pub status: ConnectionStatus,
     pub last_error: Option<String>,
 }
 
@@ -156,17 +162,17 @@ impl AppState {
     pub fn new() -> Self {
         Self {
             title: "Home Assistant",
-            entities: IndexMap::new(),
+            cards: Vec::new(),
             selected: 0,
-            status: "<connecting>".to_string(),
+            status: ConnectionStatus::Connecting,
             last_error: None,
         }
     }
 
     /// All cards showing the given entity.
-    pub fn get_entity_cards(&mut self, entity_id: &str) -> Vec<&mut Card> {
-        self.entities
-            .values_mut()
+    pub fn cards_for_entity(&mut self, entity_id: &str) -> Vec<&mut Card> {
+        self.cards
+            .iter_mut()
             .filter(|card| card.entity_id == entity_id)
             .collect()
     }
