@@ -1,21 +1,21 @@
 use ratatui::{
-    Frame,
+    buffer::Buffer,
     layout::{Alignment, Rect},
     style::{Color, Style},
-    widgets::{Block, Paragraph, Wrap},
+    widgets::{Paragraph, Widget, Wrap},
 };
 
+use super::named;
 use crate::types::app::Card;
 
-pub fn render(frame: &mut Frame, area: Rect, card: &Card, block: Block, border_style: Style) {
-    let text = plain_text(&card.state);
+pub fn render(buf: &mut Buffer, area: Rect, card: &Card, border_style: Style) {
+    let text = named(card, plain_text(&card.state));
 
     let widget = Paragraph::new(text)
         .alignment(Alignment::Left)
-        .block(block)
         .style(border_style.fg(Color::White))
         .wrap(Wrap { trim: true });
-    frame.render_widget(widget, area);
+    widget.render(area, buf);
 }
 
 /// Markdown as plain text, a terminal has no markdown.

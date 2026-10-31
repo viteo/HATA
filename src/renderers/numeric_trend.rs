@@ -1,26 +1,25 @@
 use ratatui::{
-    Frame,
+    buffer::Buffer,
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Style},
-    text::Line,
-    widgets::{Block, Paragraph, Sparkline, Wrap},
+    widgets::{Paragraph, Sparkline, Widget, Wrap},
 };
 
+use super::named;
 use crate::types::app::Card;
 
-pub fn render(frame: &mut Frame, area: Rect, card: &Card, block: Block, border_style: Style) {
+pub fn render(buf: &mut Buffer, area: Rect, card: &Card, border_style: Style) {
     let [value_area, graph_area, details_area] = Layout::vertical([
-        Constraint::Length(3),
         Constraint::Length(2),
-        Constraint::Min(1),
+        Constraint::Min(0),
+        Constraint::Length(1),
     ])
     .areas(area);
 
-    let value = Paragraph::new(Line::from(format!(" {} ", card.state)))
+    let value = Paragraph::new(named(card, card.state.clone()))
         .alignment(Alignment::Center)
-        .style(border_style.fg(Color::White).bold())
-        .block(block);
-    frame.render_widget(value, value_area);
+        .style(border_style.fg(Color::White).bold());
+    value.render(value_area, buf);
 
     if let Some(samples) = &card.samples {
         if samples.len() >= 2 {
@@ -28,7 +27,7 @@ pub fn render(frame: &mut Frame, area: Rect, card: &Card, block: Block, border_s
             let sparkline = Sparkline::default()
                 .data(&sparkline_data)
                 .style(Style::default().fg(Color::Green));
-            frame.render_widget(sparkline, graph_area);
+            sparkline.render(graph_area, buf);
         }
     }
 
@@ -37,7 +36,7 @@ pub fn render(frame: &mut Frame, area: Rect, card: &Card, block: Block, border_s
         .alignment(Alignment::Center)
         .style(Style::default().fg(Color::Gray))
         .wrap(Wrap { trim: true });
-    frame.render_widget(details, details_area);
+    details.render(details_area, buf);
 }
 
 fn normalize_samples(samples: &[f32]) -> Vec<u64> {

@@ -1,7 +1,7 @@
 use crate::types::{
-    app::{AppEvent, Card, ConnectionStatus, local_renderer},
+    app::{AppEvent, Card, ConnectionStatus, Section, local_renderer},
     events::*,
-    lovelace::{LovelaceCardConfig, extract_all_cards},
+    lovelace::{LovelaceSectionConfig, extract_sections},
     responses::Response};
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
@@ -70,7 +70,7 @@ impl WebSockConnection {
             .collect())
     }
 
-    pub async fn fetch_lovelace_config(&mut self, url_path: &str) -> Result<Vec<Card>> {
+    pub async fn fetch_lovelace_config(&mut self, url_path: &str) -> Result<(Vec<Card>, Vec<Section>)> {
         self.id += 1;
         let get_states_payload = json!({
             "id": self.id,
@@ -80,8 +80,8 @@ impl WebSockConnection {
         });
         self.socket.send(Message::Text(get_states_payload.to_string().into())).await?;
 
-        let cards = extract_all_cards(&self.get_result().await?.unwrap());
-        Ok(build_cards(&cards))
+        let sections = extract_sections(&self.get_result().await?.unwrap());
+        Ok(build_cards(&sections))
     }
 
     pub async fn subscribe_entities(&mut self, entity_ids: Vec<&String>) -> Result<()> {
@@ -124,16 +124,17 @@ impl WebSockConnection {
                 service.to_string(),
             ),
         };
-        let call_service_payload = json!({
+        let mut call_service_payload = json!({
             "id": self.id,
             "type": "call_service",
             "domain": domain,
             "service": name,
-            "target": {
-                "entity_id": entity_id
-            },
             "service_data": data.unwrap_or(json!({}))
         });
+        // a frontend card has no entity to target
+        if !entity_id.starts_with("local.") {
+            call_service_payload["target"] = json!({ "entity_id": entity_id });
+        }
         self.socket.send(Message::Text(call_service_payload.to_string().into())).await?;
 
         Ok(())
@@ -164,44 +165,61 @@ impl WebSockConnection {
     }
 }
 
-fn build_cards(cards: &[LovelaceCardConfig]) -> Vec<Card> {
+fn build_cards(sections: &[LovelaceSectionConfig]) -> (Vec<Card>, Vec<Section>) {
     let mut entities: Vec<Card> = Vec::new();
+    let mut built_sections: Vec<Section> = Vec::new();
 
-    for card in cards {
-        let card_type = card.r#type.clone();
-        let card_entities = card.entity_configs();
-        let is_empty = card_entities.is_empty();
+    for section in sections {
+        let first = entities.len();
+        for card in section.flat_cards() {
+            let card_type = card.r#type.clone();
+            let card_entities = card.entity_configs();
+            let is_empty = card_entities.is_empty();
+            let (columns, rows) = card.grid_size();
 
-        for entity in card_entities {
-            let Some((domain, _)) = entity.entity.split_once('.') else {
-                continue;
-            };
-            let domain = domain.to_string();
-            let mut card = Card::new(entity.entity.clone(), domain, card_type.clone());
-            card.name = entity.name.unwrap_or_default();
-            card.tap_action = entity.tap_action;
-            entities.push(card);
-        }
+            for entity in card_entities {
+                let Some((domain, _)) = entity.entity.split_once('.') else {
+                    continue;
+                };
+                let domain = domain.to_string();
+                let mut card = Card::new(entity.entity.clone(), domain, card_type.clone());
+                card.name = entity.name.unwrap_or_default();
+                card.tap_action = entity.tap_action;
+                card.set_size(columns, rows);
+                entities.push(card);
+            }
 
-        // a frontend card without entity
-        if is_empty {
-            if let Some(renderer) = local_renderer(&card_type) {
-                let entity_id = format!("local.{}", card_type);
-                let title = card.title.clone().unwrap_or_default();
-                let content = card
-                    .extra
-                    .get("content")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string);
-                let mut local_card = Card::new(entity_id, "local".to_string(), card_type.clone());
-                local_card.renderer = renderer;
-                local_card.name = title;
-                local_card.state = content.unwrap_or_default();
-                entities.push(local_card);
+            // a frontend card without entity
+            if is_empty {
+                if let Some(renderer) = local_renderer(&card_type) {
+                    let entity_id = format!("local.{}", card_type);
+                    // a heading card names itself in "heading"
+                    let title = card
+                        .title
+                        .clone()
+                        .or_else(|| card.extra.get("heading").and_then(|v| v.as_str()).map(str::to_string))
+                        .unwrap_or_default();
+                    let content = card
+                        .extra
+                        .get("content")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string);
+                    let mut local_card = Card::new(entity_id, "local".to_string(), card_type.clone());
+                    local_card.renderer = renderer;
+                    local_card.name = title;
+                    local_card.state = content.unwrap_or_default();
+                    local_card.tap_action = card.tap_action();
+                    local_card.set_size(columns, rows);
+                    entities.push(local_card);
+                }
             }
         }
+        built_sections.push(Section {
+            column_span: section.column_span.unwrap_or(1),
+            cards: (first..entities.len()).collect(),
+        });
     }
-    entities
+    (entities, built_sections)
 }
 
 /// The domain the services of the entity live in.
@@ -229,7 +247,7 @@ pub async fn ha_worker(ha_url: &str, ha_token: &str, dashboard: &str, ui_tx: &mp
     }
     ui_tx.send(AppEvent::Status(ConnectionStatus::Connected(ws_client.ha_version.clone()))).await?;
 
-    let mut cards: Vec<Card> = ws_client.fetch_lovelace_config(dashboard).await?;
+    let (mut cards, sections) = ws_client.fetch_lovelace_config(dashboard).await?;
     let services = ws_client.fetch_services().await?;
     for card in &mut cards {
         let domain = card.domain.clone();
@@ -247,7 +265,7 @@ pub async fn ha_worker(ha_url: &str, ha_token: &str, dashboard: &str, ui_tx: &mp
         .subscribe_entities(entity_ids.iter().collect::<Vec<_>>())
         .await?;
 
-    ui_tx.send(AppEvent::Snapshot { cards: cards }).await?;
+    ui_tx.send(AppEvent::Snapshot { cards, sections }).await?;
 
     let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(30));
     // event loop

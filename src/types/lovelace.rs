@@ -2,6 +2,8 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
 
+use crate::layout::FULL;
+
 // https://github.com/home-assistant/frontend/blob/master/src/data/lovelace/config/types.ts
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
@@ -12,9 +14,42 @@ pub struct LovelaceCardConfig {
     pub name: Option<String>,
     pub entity: Option<String>,
     pub entities: Option<Vec<Value>>,
+    pub grid_options: Option<LovelaceGridOptions>,
     // Everything else (icon, theme, style, custom fields, etc.)
     #[serde(flatten)]
     pub extra: HashMap<String, Value>,
+}
+
+/// The size of a card in the grid of a section.
+/// https://github.com/home-assistant/frontend/blob/dev/src/panels/lovelace/types.ts
+#[derive(Debug, Deserialize)]
+pub struct LovelaceGridOptions {
+    /// A number of cells or "full".
+    pub columns: Option<Value>,
+    /// A number of rows or "auto".
+    pub rows: Option<Value>,
+}
+
+/// https://github.com/home-assistant/frontend/blob/dev/src/data/lovelace/config/section.ts
+#[derive(Debug, Deserialize)]
+pub struct LovelaceSectionConfig {
+    pub column_span: Option<u16>,
+    #[serde(default)]
+    pub cards: Vec<Value>,
+}
+
+/// https://github.com/home-assistant/frontend/blob/dev/src/data/lovelace/config/view.ts
+#[derive(Debug, Deserialize)]
+pub struct LovelaceViewConfig {
+    pub sections: Option<Vec<LovelaceSectionConfig>>,
+    pub cards: Option<Vec<Value>>,
+}
+
+/// https://github.com/home-assistant/frontend/blob/dev/src/data/lovelace/config/types.ts
+#[derive(Debug, Deserialize)]
+pub struct LovelaceConfig {
+    #[serde(default)]
+    pub views: Vec<LovelaceViewConfig>,
 }
 
 /// The configuration of an entity inside a card.
@@ -62,6 +97,25 @@ impl LovelaceCardConfig {
         }
         configs
     }
+
+    /// The service to call when the card itself is activated, and its data.
+    pub fn tap_action(&self) -> Option<(String, Value)> {
+        self.extra.get("tap_action").and_then(parse_action)
+    }
+
+    /// The size set in the grid options, in cells and rows; "full" is `FULL`, "auto" is none.
+    pub fn grid_size(&self) -> (Option<u16>, Option<u16>) {
+        let Some(options) = &self.grid_options else {
+            return (None, None);
+        };
+        let columns = match &options.columns {
+            Some(Value::String(full)) if full == "full" => Some(FULL),
+            Some(columns) => columns.as_u64().map(|c| c as u16),
+            None => None,
+        };
+        let rows = options.rows.as_ref().and_then(Value::as_u64).map(|r| r as u16);
+        (columns, rows)
+    }
 }
 
 /// The service to call and its data, if the action is a service call.
@@ -100,45 +154,81 @@ fn parse_action(value: &Value) -> Option<(String, Value)> {
     Some((service, data))
 }
 
-/// Returns a flat Vec of **every** card in the entire Lovelace config
-pub fn extract_all_cards(root: &Value) -> Vec<LovelaceCardConfig> {
-    let mut cards = Vec::new();
-    collect_cards(root, &mut cards);
-    cards
+/// The sections of all views; each card of a view without sections makes a section of its own.
+pub fn extract_sections(root: &Value) -> Vec<LovelaceSectionConfig> {
+    let Ok(config) = serde_json::from_value::<LovelaceConfig>(root.clone()) else {
+        return Vec::new();
+    };
+    let mut sections = Vec::new();
+    for view in config.views {
+        if let Some(view_sections) = view.sections {
+            sections.extend(view_sections);
+        } else {
+            for card in view.cards.unwrap_or_default() {
+                sections.push(LovelaceSectionConfig { column_span: None, cards: vec![card] });
+            }
+        }
+    }
+    sections
 }
 
-/// Recursively look for card objects in json
+impl LovelaceSectionConfig {
+    /// The cards of the section, with stacks replaced by the cards in them.
+    pub fn flat_cards(&self) -> Vec<LovelaceCardConfig> {
+        let mut cards = Vec::new();
+        for card in &self.cards {
+            collect_cards(card, &mut cards);
+        }
+        cards
+    }
+}
+
 fn collect_cards(value: &Value, found_cards: &mut Vec<LovelaceCardConfig>) {
-    match value {
-        Value::Object(obj) => {
-            // "cards" array
-            if let Some(Value::Array(cards_arr)) = obj.get("cards") {
-                for card_value in cards_arr {
-                    if let Ok(card) = serde_json::from_value::<LovelaceCardConfig>(card_value.clone()) {
-                        found_cards.push(card);
-                    }
-                    collect_cards(card_value, found_cards); // recurse deeper
-                }
-            }
-
-            // singular card
-            if let Some(card_val) = obj.get("card") {
-                if let Ok(card) = serde_json::from_value::<LovelaceCardConfig>(card_val.clone()) {
-                    found_cards.push(card);
-                }
-                collect_cards(card_val, found_cards);
-            }
-
-            // recurse into everything else
-            for v in obj.values() {
-                collect_cards(v, found_cards);
-            }
+    // a stack shows its "cards", a conditional card shows its "card"
+    if let Some(Value::Array(cards)) = value.get("cards") {
+        for card in cards {
+            collect_cards(card, found_cards);
         }
-        Value::Array(arr) => {
-            for item in arr {
-                collect_cards(item, found_cards);
-            }
-        }
-        _ => {}
+    } else if let Some(card) = value.get("card") {
+        collect_cards(card, found_cards);
+    } else if let Ok(card) = serde_json::from_value::<LovelaceCardConfig>(value.clone()) {
+        found_cards.push(card);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn nested_stacks_give_each_card_once() {
+        let config = json!({"views": [{"sections": [{"cards": [
+            {"type": "vertical-stack", "cards": [
+                {"type": "vertical-stack", "cards": [{"type": "tile", "entity": "light.a"}]}
+            ]}
+        ]}]}]});
+        let sections = extract_sections(&config);
+        let cards = sections[0].flat_cards();
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].entity.as_deref(), Some("light.a"));
+    }
+
+    #[test]
+    fn cards_of_a_view_without_sections_make_sections() {
+        let config = json!({"views": [{"cards": [
+            {"type": "tile", "entity": "light.a"},
+            {"type": "tile", "entity": "light.b"}
+        ]}]});
+        assert_eq!(extract_sections(&config).len(), 2);
+    }
+
+    #[test]
+    fn grid_size_reads_full_and_auto() {
+        let card: LovelaceCardConfig = serde_json::from_value(json!(
+            {"type": "heading", "grid_options": {"columns": "full", "rows": "auto"}}
+        ))
+        .unwrap();
+        assert_eq!(card.grid_size(), (Some(FULL), None));
     }
 }

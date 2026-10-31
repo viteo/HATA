@@ -1,6 +1,7 @@
 use serde_json::Value;
 
 use super::actions;
+use crate::layout::{DashboardLayout, FULL, ROW_LINES};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RendererKind {
@@ -8,6 +9,7 @@ pub enum RendererKind {
     Binary,
     NumericTrend,
     Markdown,
+    Heading,
     Default,
 }
 
@@ -16,6 +18,7 @@ pub fn local_renderer(card_type: &str) -> Option<RendererKind> {
     match card_type {
         "clock" => Some(RendererKind::Clock),
         "markdown" => Some(RendererKind::Markdown),
+        "heading" => Some(RendererKind::Heading),
         _ => None,
     }
 }
@@ -34,6 +37,10 @@ pub struct Card {
     pub services: Vec<String>,
     pub renderer: RendererKind,
     pub samples: Option<Vec<f32>>,
+    /// The width on the grid of a section, in cells.
+    pub columns: u16,
+    /// The height on the grid, in rows.
+    pub rows: u16,
 }
 
 impl Card {
@@ -52,6 +59,8 @@ impl Card {
             } else {
                 None
             },
+            columns: 0,
+            rows: 0,
         }
     }
 
@@ -72,6 +81,28 @@ impl Card {
             return RendererKind::Binary;
         }
         RendererKind::Default
+    }
+
+    /// Sets the size on the grid, taking the default of the card for what is not given.
+    pub fn set_size(&mut self, columns: Option<u16>, rows: Option<u16>) {
+        let (default_columns, default_rows) = match self.renderer {
+            // a heading is a line between the rows
+            RendererKind::Heading => (FULL, 0),
+            RendererKind::Markdown => {
+                // as many rows as the text needs
+                let lines = self.state.lines().count() as u16 + u16::from(!self.name.is_empty());
+                (FULL, (lines + 1).div_ceil(ROW_LINES).max(1))
+            }
+            RendererKind::NumericTrend => (6, 2),
+            _ => (6, 1),
+        };
+        self.columns = columns.unwrap_or(default_columns);
+        self.rows = rows.unwrap_or(default_rows);
+    }
+
+    /// Whether the card can be selected; a heading only when it has an action.
+    pub fn is_focusable(&self) -> bool {
+        self.renderer != RendererKind::Heading || self.tap_action.is_some()
     }
 
     /// The service to call to toggle the entity.
@@ -113,6 +144,15 @@ impl Card {
     }
 }
 
+/// A group of cards of the dashboard, as the sections of the web app.
+#[derive(Debug)]
+pub struct Section {
+    /// The width in columns of sections.
+    pub column_span: u16,
+    /// The indices of its cards.
+    pub cards: Vec<usize>,
+}
+
 /// The status of the connection to Home Assistant.
 /// Mirrors `ConnectionStatus` of the web app.
 #[derive(Debug)]
@@ -140,6 +180,7 @@ pub enum AppEvent {
     // from backend
     Snapshot {
         cards: Vec<Card>,
+        sections: Vec<Section>,
     },
     StateChanged { entity_id: String, state: String },
     EntityAdded { entity_id: String, name: String, state: String },
@@ -153,7 +194,12 @@ pub enum AppEvent {
 pub struct AppState {
     pub title: &'static str,
     pub cards: Vec<Card>,
+    pub sections: Vec<Section>,
+    /// Where the cards are, as last drawn.
+    pub layout: DashboardLayout,
     pub selected: usize,
+    /// The first line of the dashboard on the screen.
+    pub scroll: u16,
     pub status: ConnectionStatus,
     pub last_error: Option<String>,
 }
@@ -163,7 +209,10 @@ impl AppState {
         Self {
             title: "Home Assistant",
             cards: Vec::new(),
+            sections: Vec::new(),
+            layout: DashboardLayout::default(),
             selected: 0,
+            scroll: 0,
             status: ConnectionStatus::Connecting,
             last_error: None,
         }
