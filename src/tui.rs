@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use crossterm::{
-    event::{EventStream, KeyCode, KeyEventKind, Event as CtEvent},
+    event::{DisableMouseCapture, EnableMouseCapture, EventStream, KeyCode, KeyEventKind, MouseButton, MouseEventKind, Event as CtEvent},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -21,12 +21,14 @@ pub fn terminal_setup() -> Result<Terminal<CrosstermBackend<Stdout>>> {
     enable_raw_mode().context("Failed to enable raw mode")?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen).context("Failed to enter alternate screen")?;
+    execute!(stdout, EnableMouseCapture).context("Failed to enable mouse capture")?;
     let backend = CrosstermBackend::new(stdout);
     Terminal::new(backend).context("Failed to create terminal")
 }
 
 pub fn terminal_restore(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
     disable_raw_mode().context("Failed to disable raw mode")?;
+    execute!(terminal.backend_mut(), DisableMouseCapture).context("Failed to disable mouse capture")?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen).context("Failed to leave alternate screen")?;
     terminal.show_cursor().context("Failed to restore cursor")
 }
@@ -76,8 +78,8 @@ pub async fn tui_worker(ui_rx: &mut mpsc::Receiver<AppEvent>, cmd_tx: &mpsc::Sen
             }
             maybe_in = input.next() => {
                 let Some(Ok(evt)) = maybe_in else { continue; };
-                if let CtEvent::Key(key) = evt {
-                    if key.kind == KeyEventKind::Press {
+                match evt {
+                    CtEvent::Key(key) if key.kind == KeyEventKind::Press => {
                         match key.code {
                             KeyCode::Char('q') => break,
                             KeyCode::Up => select_neighbor(&mut app, Direction::Up),
@@ -86,22 +88,24 @@ pub async fn tui_worker(ui_rx: &mut mpsc::Receiver<AppEvent>, cmd_tx: &mpsc::Sen
                             KeyCode::Right => select_neighbor(&mut app, Direction::Right),
                             KeyCode::Tab => select_next(&mut app, true),
                             KeyCode::BackTab => select_next(&mut app, false),
-                            KeyCode::Enter => {
-                                if !app.cards.is_empty() {
-                                    let card = &app.cards[app.selected];
-                                    let entity_id = card.entity_id.clone();
-                                    let action = card.toggle_service();
-                                    let data = card.tap_action_data();
-                                    if let Some(service) = action {
-                                        let _ = cmd_tx.send(AppEvent::CallService { entity_id, service, data }).await;
-                                    } else {
-                                        app.last_error = Some(format!("No supported service for {}", entity_id));
-                                    }
-                                }
-                            }
+                            KeyCode::Enter => activate(&mut app, cmd_tx).await,
                             _ => {}
                         }
                     }
+                    CtEvent::Mouse(mouse) => {
+                        match mouse.kind {
+                            MouseEventKind::Down(MouseButton::Left) => {
+                                if let Some(i) = card_at(&app, mouse.column, mouse.row) {
+                                    app.selected = i;
+                                    activate(&mut app, cmd_tx).await;
+                                }
+                            }
+                            MouseEventKind::ScrollUp => select_neighbor(&mut app, Direction::Up),
+                            MouseEventKind::ScrollDown => select_neighbor(&mut app, Direction::Down),
+                            _ => {}
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
@@ -145,6 +149,39 @@ fn select_neighbor(app: &mut AppState, direction: Direction) {
     }
 }
 
+/// Calls the service of the selected card.
+async fn activate(app: &mut AppState, cmd_tx: &mpsc::Sender<AppEvent>) {
+    if !app.cards.is_empty() {
+        let card = &app.cards[app.selected];
+        let entity_id = card.entity_id.clone();
+        let action = card.toggle_service();
+        let data = card.tap_action_data();
+        if let Some(service) = action {
+            let _ = cmd_tx.send(AppEvent::CallService { entity_id, service, data }).await;
+        } else {
+            app.last_error = Some(format!("No supported service for {}", entity_id));
+        }
+    }
+}
+
+/// The selectable card drawn at the position on the screen.
+fn card_at(app: &AppState, column: u16, row: u16) -> Option<usize> {
+    let area = app.dashboard_area;
+    if !area.contains(Position::new(column, row)) {
+        return None;
+    }
+    let grid = Grid { cells: app.layout.width, chars: area.width.saturating_sub(1) };
+    let position = Position::new(column - area.x, row - area.y + app.scroll);
+    app.layout
+        .cards
+        .iter()
+        .enumerate()
+        .filter(|&(i, rect)| is_selectable(app, i) && rect.is_some_and(|rect| grid.rect(rect).contains(position)))
+        // a heading is on a line shared with the cards around it
+        .min_by_key(|&(i, _)| app.cards[i].renderer != RendererKind::Heading)
+        .map(|(i, _)| i)
+}
+
 /// Selects the next card in the order of the dashboard, or the previous one.
 fn select_next(app: &mut AppState, forward: bool) {
     let count = app.cards.len();
@@ -161,6 +198,7 @@ fn select_next(app: &mut AppState, forward: bool) {
 const MIN_SECTION_CHARS: u16 = 26;
 
 fn draw_body(frame: &mut Frame, app: &mut AppState, area: &Rect) {
+    app.dashboard_area = *area;
     if app.cards.is_empty() {
         return;
     }

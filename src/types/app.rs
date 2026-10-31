@@ -1,3 +1,4 @@
+use ratatui::layout::Rect;
 use serde_json::Value;
 
 use super::actions;
@@ -200,6 +201,8 @@ pub struct AppState {
     pub selected: usize,
     /// The first line of the dashboard on the screen.
     pub scroll: u16,
+    /// Where the dashboard is on the screen, as last drawn.
+    pub dashboard_area: Rect,
     pub status: ConnectionStatus,
     pub last_error: Option<String>,
 }
@@ -213,6 +216,7 @@ impl AppState {
             layout: DashboardLayout::default(),
             selected: 0,
             scroll: 0,
+            dashboard_area: Rect::default(),
             status: ConnectionStatus::Connecting,
             last_error: None,
         }
