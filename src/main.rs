@@ -21,7 +21,7 @@ async fn main() -> Result<()> {
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<AppEvent>(256);
 
     tokio::spawn(async move {
-        if let Err(e) = ha_worker(&args.ha_url, &args.ha_token, &args.dashboard, &ui_tx, &mut cmd_rx).await {
+        if let Err(e) = ha_worker(&args.server, &args.token, &args.dashboard, &ui_tx, &mut cmd_rx).await {
             // report error back to UI
             let full_msg = e
                 .chain()
