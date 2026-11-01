@@ -15,6 +15,7 @@ use tokio::sync::mpsc;
 
 use crate::layout::{self, DashboardLayout, Direction, Grid};
 use crate::renderers::render_card;
+use crate::touch::Touchscreen;
 use crate::types::app::{AppEvent, AppState, RendererKind};
 
 pub fn terminal_setup() -> Result<Terminal<CrosstermBackend<Stdout>>> {
@@ -37,6 +38,7 @@ pub async fn tui_worker(ui_rx: &mut mpsc::Receiver<AppEvent>, cmd_tx: &mpsc::Sen
     let mut terminal = terminal_setup()?;
     let mut app = AppState::new();
     let mut input = EventStream::new();
+    let mut touchscreen = Touchscreen::open();
 
     terminal.clear()?;
     terminal.draw(|f| draw(f, &mut app))?;
@@ -94,12 +96,7 @@ pub async fn tui_worker(ui_rx: &mut mpsc::Receiver<AppEvent>, cmd_tx: &mpsc::Sen
                     }
                     CtEvent::Mouse(mouse) => {
                         match mouse.kind {
-                            MouseEventKind::Down(MouseButton::Left) => {
-                                if let Some(i) = card_at(&app, mouse.column, mouse.row) {
-                                    app.selected = i;
-                                    activate(&mut app, cmd_tx).await;
-                                }
-                            }
+                            MouseEventKind::Down(MouseButton::Left) => activate_at(&mut app, cmd_tx, mouse.column, mouse.row).await,
                             MouseEventKind::ScrollUp => select_neighbor(&mut app, Direction::Up),
                             MouseEventKind::ScrollDown => select_neighbor(&mut app, Direction::Down),
                             _ => {}
@@ -108,6 +105,12 @@ pub async fn tui_worker(ui_rx: &mut mpsc::Receiver<AppEvent>, cmd_tx: &mpsc::Sen
                     _ => {}
                 }
             }
+            Some((column, row)) = async {
+                match touchscreen.as_mut() {
+                    Some(touchscreen) => touchscreen.next_tap().await,
+                    None => std::future::pending().await,
+                }
+            } => activate_at(&mut app, cmd_tx, column, row).await,
         }
         terminal.draw(|f| draw(f, &mut app))?;
     }
@@ -161,6 +164,14 @@ async fn activate(app: &mut AppState, cmd_tx: &mpsc::Sender<AppEvent>) {
         } else {
             app.last_error = Some(format!("No supported service for {}", entity_id));
         }
+    }
+}
+
+/// Selects the card under a tap or a click and acts on it at once, as in the web app.
+async fn activate_at(app: &mut AppState, cmd_tx: &mpsc::Sender<AppEvent>, column: u16, row: u16) {
+    if let Some(i) = card_at(app, column, row) {
+        app.selected = i;
+        activate(app, cmd_tx).await;
     }
 }
 

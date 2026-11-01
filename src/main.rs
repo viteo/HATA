@@ -3,6 +3,7 @@ mod layout;
 mod ha;
 mod renderers;
 mod tui;
+mod touch;
 mod types { pub mod actions; pub mod lovelace; pub mod events; pub mod responses; pub mod app;}
 
 use anyhow::Result;
