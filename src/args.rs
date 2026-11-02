@@ -1,5 +1,5 @@
 use anyhow::{Result, Context};
-use std::{env, fs, io, path::PathBuf};
+use std::{env, fs, path::{Path, PathBuf}};
 
 // options and environment variables as in hass-cli
 pub struct Args {
@@ -10,22 +10,46 @@ pub struct Args {
 
 impl Args {
     pub fn parse() -> Result<Self> {
-        // the config file, overridden by environment variables, overridden by options
-        let mut config = read_config()?;
-        config.server = env::var("HASS_SERVER").ok().or(config.server);
-        config.token = env::var("HASS_TOKEN").ok().or(config.token);
-        config.dashboard = env::var("HASS_DASHBOARD").ok().or(config.dashboard);
+        let mut options = Config::default();
+        let mut config_file = None;
+        let mut help = false;
 
         let mut args = env::args().skip(1);
         while let Some(arg) = args.next() {
-            let value = args.next().with_context(|| format!("Missing value for {arg}"))?;
+            let mut value = || args.next().with_context(|| format!("Missing value for {arg}"));
             match arg.as_str() {
-                "--server" => config.server = Some(value),
-                "--token" => config.token = Some(value),
-                "--dashboard" => config.dashboard = Some(value),
-                _ => anyhow::bail!("Unknown argument: {arg}"),
+                "-s" | "--server" => options.server = Some(value()?),
+                "--token" => options.token = Some(value()?),
+                "--dashboard" => options.dashboard = Some(value()?),
+                "--config" => config_file = Some(PathBuf::from(value()?)),
+                "-h" | "--help" => help = true,
+                "-V" | "--version" => {
+                    println!("hata {}", env!("CARGO_PKG_VERSION"));
+                    std::process::exit(0);
+                }
+                _ => anyhow::bail!("Unknown argument: {arg}\nSee `hata --help`."),
             }
         }
+
+        // a file given in the options must exist, the usual one may not
+        let required = config_file.is_some();
+        let config_file = config_file.or_else(config_path);
+        if help {
+            print!("{}", usage(config_file.as_deref()));
+            std::process::exit(0);
+        }
+
+        // the config file, overridden by environment variables, overridden by options
+        let mut config = match &config_file {
+            Some(path) if required || path.exists() => read_config(path)?,
+            _ => Config::default(),
+        };
+        config.server = env::var("HASS_SERVER").ok().or(config.server);
+        config.token = env::var("HASS_TOKEN").ok().or(config.token);
+        config.dashboard = env::var("HASS_DASHBOARD").ok().or(config.dashboard);
+        config.server = options.server.or(config.server);
+        config.token = options.token.or(config.token);
+        config.dashboard = options.dashboard.or(config.dashboard);
 
         Ok(Self {
             server: config.server.context("Missing server: --server, HASS_SERVER or `server` in the config file")?,
@@ -33,6 +57,39 @@ impl Args {
             dashboard: config.dashboard.unwrap_or_else(|| "dashboard-tui".to_string()),
         })
     }
+}
+
+fn usage(config_file: Option<&Path>) -> String {
+    let config_file = match config_file {
+        Some(path) if path.exists() => path.display().to_string(),
+        Some(path) => format!("{} (not found)", path.display()),
+        None => "none".to_string(),
+    };
+    format!(
+"HATA - Home Assistant Terminal Access {version}
+Shows a Home Assistant dashboard in the terminal.
+
+Usage: hata [options]
+
+Options:
+  -s, --server <url>      Home Assistant URL, e.g. http://homeassistant.local:8123
+      --token <token>     Long-lived access token, from your profile in Home Assistant
+      --dashboard <name>  dashboard name from URL in HA [default: dashboard-tui]
+      --config <file>     Config file to read instead of default one
+  -V, --version           Print the version
+  -h, --help              Print this help
+
+Environment variables:
+  HASS_SERVER, HASS_TOKEN, HASS_DASHBOARD
+
+Config file:
+  {config_file}
+  `key = value` lines with the keys `server`, `token` and `dashboard`.
+
+Options override environment variables, which override the config file.
+",
+        version = env!("CARGO_PKG_VERSION"),
+    )
 }
 
 /// The settings of the config file.
@@ -51,13 +108,8 @@ fn config_path() -> Option<PathBuf> {
     Some(config_folder.join("hata").join("config"))
 }
 
-/// Nothing is set when there is no config file.
-fn read_config() -> Result<Config> {
-    let Some(path) = config_path() else { return Ok(Config::default()) };
-    let text = match fs::read_to_string(&path) {
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Config::default()),
-        text => text.with_context(|| format!("Failed to read {}", path.display()))?,
-    };
+fn read_config(path: &Path) -> Result<Config> {
+    let text = fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?;
     parse_config(&text).with_context(|| format!("Failed to read {}", path.display()))
 }
 
